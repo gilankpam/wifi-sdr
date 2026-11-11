@@ -27,6 +27,7 @@ constexpr uint32_t kBankC2h[2] = {0x16000u, 0x06000u}; // TXFF 0x20000 / 0x30000
 constexpr uint8_t kSentinel[8] = {0xE1, 0xF1, 0x47, 0x5E, 0xA5, 0xA5, 0xA5, 0xA5}; // stream8822b.S
 
 constexpr unsigned kStartRetries = 2;
+constexpr unsigned kMaxLateRun = 64; // soft_deadline: ~13 ms of late banks at 40 MS/s means the chip is not catching up
 
 size_t chunk_off(int k) { return Stream8822b::kPrefix + static_cast<size_t>(k) * Stream8822b::kChunk; }
 
@@ -156,6 +157,7 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
     start();
 
     const double budget5 = static_cast<double>(period5) - guard5;
+    unsigned late_run = 0; // soft_deadline: consecutive late banks
     for (uint32_t seq = 0;; seq++) {
       if (stop && *stop)
         break;
@@ -200,6 +202,16 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
           rd.release();
           continue;
         }
+        if (part < 4 && _c.soft_deadline && static_cast<size_t>(d.len) == 24 + kTrailerPayload &&
+            std::memcmp(d.data, trl_desc, 12) == 0) {
+          // The trailer came while data was still due: the chip cut data packets short during a host
+          // stall (they arrived as headerless strays). It still closes this bank (its seq is checked
+          // below): zero the missing chunks and keep streaming instead of restarting.
+          for (int k = part; k < 4; k++)
+            std::memset(bank.data() + chunk_off(k), 0, kChunk);
+          bi.damaged = true;
+          part = 4;
+        }
         const bool trailer = part == 4;
         const uint8_t *want = trailer ? trl_desc : data_desc;
         const size_t want_len = 24 + (trailer ? kTrailerPayload : kChunk);
@@ -217,9 +229,17 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
           bi.late_us = static_cast<int32_t>(stamp[2] - stamp[1]) / 5.0;
           bi.ship_us = static_cast<int32_t>(stamp[3] - stamp[2]) / 5.0;
           bi.end_us = static_cast<int32_t>(stamp[3] - stamp[1]) / 5.0;
-          if (!_c.gapped && bi.end_us * 5 > budget5) // gapped: the LA is stopped while a bank ships
-            throw std::runtime_error("deadline: bank " + std::to_string(seq) + " ended " +
-                                     std::to_string(bi.end_us) + " us after due");
+          if (bi.damaged && ++late_run > kMaxLateRun)
+            throw std::runtime_error("framing: " + std::to_string(late_run) + " damaged/late banks in a row");
+          if (!_c.gapped && bi.end_us * 5 > budget5) { // gapped: the LA is stopped while a bank ships
+            if (!_c.soft_deadline || (!bi.damaged && ++late_run > kMaxLateRun))
+              throw std::runtime_error("deadline: bank " + std::to_string(seq) + " ended " +
+                                       std::to_string(bi.end_us) + " us after due (late " +
+                                       std::to_string(bi.late_us) + ", ship " + std::to_string(bi.ship_us) + ")");
+            bi.late = true;
+          } else if (!bi.damaged) {
+            late_run = 0;
+          }
         }
         rd.release();
         part++;
@@ -244,6 +264,8 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
       seen[b] = true;
       st.banks++;
       st.stale += bi.stale;
+      st.late += bi.late;
+      st.damaged += bi.damaged;
       st.pattern_bad += bi.pattern_bad;
       st.late_max_us = std::max(st.late_max_us, bi.late_us);
       st.ship_max_us = std::max(st.ship_max_us, bi.ship_us);

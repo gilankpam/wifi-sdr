@@ -33,6 +33,11 @@ struct StreamCfg {
   int guard_us = 20;       // ship a bank this long after the ADC is due to finish it (< 0: test only)
   bool gapped = false;     // capture one bank, stop, ship, re-arm (banks not contiguous)
   unsigned pkt_timeout_ms = 200;
+  // A bank that ships past period - guard is normally a fault (the ADC may already be overwriting its
+  // first samples). soft_deadline: deliver it anyway (BankInfo::late), keep streaming, and fault only after
+  // kMaxLateRun such banks in a row. Likewise a bank whose data packets the chip cut short (BankInfo::damaged). For consumers that shrug off a few damaged samples (video) on hosts
+  // whose USB stack stalls now and then (Windows: DPC latency, measured 2026-11-11).
+  bool soft_deadline = false;
 };
 
 struct BankInfo {
@@ -43,6 +48,8 @@ struct BankInfo {
   double end_us = 0;       // end - due time; must stay below period - guard
   bool stale = false;      // live: a stale descriptor survived (bank not rewritten by the ADC)
   bool pattern_bad = false; // synthetic: payload differs from the fill pattern
+  bool late = false;       // soft_deadline: shipped past the deadline (first samples may be newer data)
+  bool damaged = false;    // soft_deadline: data packets lost, the trailer closed the bank (missing chunks zeroed)
 };
 
 struct StreamStats {
@@ -51,6 +58,8 @@ struct StreamStats {
   unsigned stale = 0;
   unsigned pattern_bad = 0;
   unsigned start_retries = 0; // starts repeated because the first packet never came (issue #2)
+  uint64_t late = 0;       // banks delivered past the deadline (soft_deadline)
+  uint64_t damaged = 0;    // banks delivered with chunks missing (soft_deadline)
   double late_max_us = 0, ship_max_us = 0, end_max_us = 0;
   double wall_s = 0;
   std::string error;       // empty unless the stream stopped on a fault

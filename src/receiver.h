@@ -39,7 +39,7 @@ inline bool jaguar3_pid(uint16_t pid) { return pid == kPid8812cu || pid == kPid8
 inline uint16_t model_pid(uint16_t vid, uint16_t pid) {
   if (vid == 0x0bda)
     return pid == kPid8812bu || jaguar3_pid(pid) ? pid : 0;
-  if (vid == 0x2357 && pid == 0x0115) // TP-Link Archer T4U v3 (RTL8812BU)
+  if (vid == 0x2357 && (pid == 0x0115 || pid == 0x012d || pid == 0x0138)) // TP-Link Archer T4U v3, T3U, T3U Plus (RTL8812BU)
     return kPid8812bu;
   return 0;
 }
@@ -53,6 +53,7 @@ struct RxSettings {
   bool agc = false;     // true: chip AGC; false: fixed gain (OFDM CCA off, IGI pinned)
   double gain_db = 30;
   bool allow_gapped = false; // rate_sel below min_rate_sel streams gapped (see BankMeta::gapped)
+  bool soft_deadline = false; // 8812BU: deliver banks that ship late instead of restarting (StreamCfg::soft_deadline)
 };
 
 struct RxCaps {
@@ -88,6 +89,8 @@ using BankSink = std::function<void(const uint8_t *bank, size_t bytes, const Ban
 struct RxStatus {
   RxState state = RxState::Closed;
   uint64_t banks = 0, restarts = 0;
+  uint64_t late_banks = 0; // delivered past the deadline (RxSettings::soft_deadline)
+  uint64_t damaged_banks = 0; // delivered with lost chunks zeroed (RxSettings::soft_deadline)
   int channel = 0, width = 20;
   double centre_hz = 0, fs = 0;
   std::string error;     // last fault (cleared on a clean run start)

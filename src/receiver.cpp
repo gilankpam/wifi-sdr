@@ -257,12 +257,19 @@ void Receiver::worker() {
     c.la.rate_sel = cur.rate_sel;
     // >= 20 MS/s needs ~13 ms of posted URBs; the 8812CU wants ~100 ms (FINDINGS §4)
     c.depth = _caps.cu || cur.rate_sel <= 2 ? 256 : 64;
+#ifdef _WIN32
+    // Windows drains the WinUSB queue in bursts (its USB stack stalls now and then): at 40 MS/s 256 posted
+    // transfers delivered ~45 % of banks, 2048 (~80 ms, 40 MB) 77-88 %, 4096 less again (2026-11-11).
+    if (cur.rate_sel <= 1 && !_caps.cu)
+      c.depth = 2048;
+#endif
     c.la.igi = cur.agc ? -1 : igi_for(cur.gain_db, _caps.cu);
     c.la.no_cca = !cur.agc;
     c.la.dfir = !_caps.cu && width >= 40 ? width : 0; // 0 leaves devourer's DFIR (8822B: BW20 set; 8822C: per width)
     if (!_caps.cu)
       c.la.dma_type = kDmaBothPaths8822b;
     c.gapped = cur.rate_sel < _caps.min_rate_sel;
+    c.soft_deadline = cur.soft_deadline;
     BankMeta meta;
     meta.gen = gen;
     meta.cfg = cfg;
@@ -284,7 +291,7 @@ void Receiver::worker() {
       _st.state = RxState::Streaming;
     }
     bool clean_start = false;
-    const auto on_bank = [&](const uint8_t *bank, const BankInfo &) {
+    const auto on_bank = [&](const uint8_t *bank, const BankInfo &bi) {
       if (!clean_start) {
         clean_start = true;
         consecutive_faults = 0;
@@ -295,6 +302,8 @@ void Receiver::worker() {
       {
         std::lock_guard<std::mutex> l(_m);
         _st.banks++;
+        _st.late_banks += bi.late;
+        _st.damaged_banks += bi.damaged;
         // A frequency change inside the same step needs no restart (set() leaves _cfg alone), so the
         // shift follows _set; after a hardware change (_cfg moved on) this run keeps its own frequency.
         meta.shift_hz = (_cfg == cfg ? _set.freq : cur.freq) - centre;
