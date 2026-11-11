@@ -28,6 +28,11 @@ inline void orphan_transfer(libusb_transfer *x, std::vector<uint8_t> &&buf) {
   x->callback = Orphan::done;
 }
 
+#if defined(__EMSCRIPTEN__) && defined(WSDR_JS_BULKIN)
+} // namespace wsdr
+#include "bulkin_js.h" // the web build's reader: WebUSB transfers kept queued from JavaScript
+namespace wsdr {
+#else
 class InOrderReader {
 public:
   InOrderReader(libusb_device_handle *h, libusb_context *ctx, int depth) : _h(h), _ctx(ctx) {
@@ -127,4 +132,5 @@ private:
   std::vector<Slot> _slots;
   std::deque<size_t> _fifo;
 };
+#endif
 } // namespace wsdr
