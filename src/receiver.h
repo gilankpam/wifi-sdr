@@ -49,7 +49,10 @@ struct RxSettings {
   int rate_sel = 5;     // fs = 80 MHz >> rate_sel: 5 = 2.5, 4 = 5, 3 = 10, 2 = 20, 1 = 40 MS/s; 0 = 80 MS/s
                         // (8812BU, gapped only: 80 MHz width + vendor BW80 RX DFIR, ~77 MHz at -6 dB)
   bool wide = true;     // at 40 MS/s: 40 MHz channel width (8812BU: + vendor BW40 RX DFIR; 8822C: devourer's
-                        // BW40 set opens its filter, flat to +-17 MHz, measured)
+                        // BW40 set opens its filter, flat to +-17 MHz, measured). 8812BU at 20 MS/s: also a
+                        // 40 MHz channel, with devourer's BW20 DFIR (+-10 MHz): at 20 MHz width the OFDM
+                        // CCA/AGC freezes the LA in 120-sample runs (~7000/s with a strong analog FPV signal;
+                        // 0 at 40 MHz width or with CCA off, measured)
   bool agc = false;     // true: chip AGC; false: fixed gain (OFDM CCA off, IGI pinned)
   double gain_db = 30;
   bool allow_gapped = false; // rate_sel below min_rate_sel streams gapped (see BankMeta::gapped)
@@ -128,7 +131,7 @@ public:
   // Pure helpers (also used by tests and UIs).
   static double rate_of(int rate_sel) { return 80e6 / (1 << rate_sel); }
   static int width_of(const RxSettings &s, bool cu) {
-    return s.rate_sel == 0 && !cu ? 80 : s.rate_sel == 1 && s.wide ? 40 : 20;
+    return s.rate_sel == 0 && !cu ? 80 : (s.rate_sel == 1 || (s.rate_sel == 2 && !cu)) && s.wide ? 40 : 20;
   }
   int lowest_rate_sel(const RxSettings &s) const {
     return s.allow_gapped ? std::min(_caps.min_rate_sel, _caps.gapped_min_rate_sel) : _caps.min_rate_sel;

@@ -259,7 +259,9 @@ void Receiver::worker() {
     c.depth = _caps.cu || cur.rate_sel <= 2 ? 256 : 64;
     c.la.igi = cur.agc ? -1 : igi_for(cur.gain_db, _caps.cu);
     c.la.no_cca = !cur.agc;
-    c.la.dfir = !_caps.cu && width >= 40 ? width : 0; // 0 leaves devourer's DFIR (8822B: BW20 set; 8822C: per width)
+    // 0 leaves devourer's DFIR (8822B: BW20 set; 8822C: per width). The wide sets only where the rate carries
+    // them: a 40 MHz channel at 20 MS/s keeps the BW20 set (+-10 MHz) so nothing aliases into the band.
+    c.la.dfir = !_caps.cu && width >= 40 && fs >= width * 1e6 ? width : 0;
     if (!_caps.cu)
       c.la.dma_type = kDmaBothPaths8822b;
     c.gapped = cur.rate_sel < _caps.min_rate_sel;
