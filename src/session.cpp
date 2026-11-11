@@ -110,6 +110,21 @@ void Session::tune(int channel, int bw) {
   radio()->SetMonitorChannel(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
                                              .ChannelOffset = static_cast<uint8_t>(bw > 20 ? 1 : 0),
                                              .ChannelWidth = width_of(bw)});
+  // The 8822B RF synth re-latches its channel state only on a change of RF18's channel byte (devourer's
+  // set_channel_bw, the 5/10 MHz comment). A width change on the same central channel (40 MHz at primary
+  // 152 -> 20 MHz at 154: both 154) rewrites only the BW bits, and RX stays deaf until the next channel
+  // change. MEASURED on an 8812BU: path-A RMS 2.9 after the 40 -> 20 switch, 158 with this edge. So every
+  // retune writes a different channel byte first, then the real value, on both paths (3-wire LSSI writes
+  // as devourer's rf_write; RF18 read back through the direct window).
+  if (_chip == "RTL8822B") {
+    for (int path = 0; path < 2; path++) {
+      const uint16_t lssi = path ? 0x0E90 : 0x0C90;
+      const uint32_t rf18 = _reg->r32(static_cast<uint16_t>((path ? 0x2C00 : 0x2800) + (0x18 << 2))) & 0xFFFFFu;
+      const uint32_t alt = (rf18 & ~0xFFu) | ((rf18 & 0xFF) == 1 ? 2u : 1u);
+      _reg->w32(lssi, (0x18u << 20) | alt);
+      _reg->w32(lssi, (0x18u << 20) | rf18);
+    }
+  }
 }
 
 } // namespace wsdr
