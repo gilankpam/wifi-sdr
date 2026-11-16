@@ -16,8 +16,41 @@
 
 namespace wsdr {
 
+constexpr uint16_t kRealtekVid = 0x0bda;
+constexpr uint16_t kPid8812bu = 0xb812;
+constexpr uint16_t kPid8812cu = 0xc812;
+constexpr uint16_t kPid8812eu = 0xa81a; // RTL8812EU (RTL8822E): runs the 8822C code unchanged (notes/cu-custom-code.md)
+// The Jaguar3 adapters (8822C, 8822E): the 8822C LA dialect, loader, streamer and gain map throughout.
+inline bool jaguar3_pid(uint16_t pid) { return pid == kPid8812cu || pid == kPid8812eu; }
+
+// OEM-branded dongles: a supported Realtek chip under the brand's own USB id. Everything past the USB
+// descriptor (the --pid dispatch, Soapy's "pid", the studio) sees the Realtek pid they stand for.
+// A new entry also needs its udev line in tools/70-wsdr.rules, and in wsdr-studio's README and
+// web/src/util.ts UDEV_RULES (a studio test checks that copy against the rules file).
+struct UsbAlias {
+  uint16_t vid, pid, rtl_pid;
+};
+inline constexpr UsbAlias kUsbAliases[] = {
+    {0x2357, 0x0138, kPid8812bu}, // TP-Link Archer T3U Plus
+};
+
+// The Realtek pid a USB descriptor stands for: its own pid under 0bda, an alias's, else 0.
+inline uint16_t realtek_pid(uint16_t dvid, uint16_t dpid) {
+  if (dvid == kRealtekVid)
+    return dpid;
+  for (const UsbAlias &a : kUsbAliases)
+    if (a.vid == dvid && a.pid == dpid)
+      return a.rtl_pid;
+  return 0;
+}
+
+// Does a USB descriptor (dvid, dpid) match the requested id (vid, pid)? A 0bda request also matches an alias.
+inline bool usb_id_matches(uint16_t vid, uint16_t pid, uint16_t dvid, uint16_t dpid) {
+  return vid == kRealtekVid ? pid != 0 && realtek_pid(dvid, dpid) == pid : dvid == vid && dpid == pid;
+}
+
 struct OpenOpts {
-  uint16_t vid = 0x0bda;
+  uint16_t vid = kRealtekVid;
   uint16_t pid = 0;   // required
   int bus = -1;       // optional: only the adapter on this USB bus ...
   std::string port;   // ... and port path ("1", "1.2"); empty = any

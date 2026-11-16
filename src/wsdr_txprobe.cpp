@@ -652,7 +652,7 @@ int find_device(libusb_context *ctx, const OpenOpts &o, libusb_device **out) {
   int rc = LIBUSB_ERROR_NOT_FOUND;
   for (ssize_t i = 0; i < n; i++) {
     libusb_device_descriptor d{};
-    if (libusb_get_device_descriptor(list[i], &d) != 0 || d.idVendor != o.vid || d.idProduct != o.pid)
+    if (libusb_get_device_descriptor(list[i], &d) != 0 || !usb_id_matches(o.vid, o.pid, d.idVendor, d.idProduct))
       continue;
     if (o.bus >= 0 && libusb_get_bus_number(list[i]) != o.bus)
       continue;

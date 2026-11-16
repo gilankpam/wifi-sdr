@@ -99,8 +99,9 @@ def load_lab():
             pid = (dev / "idProduct").read_text().strip()
         except OSError as e:
             die(f"cannot read {dev}: {e}")
-        if vid != "0bda" or pid != "b812":
-            die(f"{what} adapter {bus}-{port} is {vid}:{pid}, expected 0bda:b812")
+        # 2357:0138 = TP-Link Archer T3U Plus, an OEM 8812BU (src/session.h kUsbAliases)
+        if f"{vid}:{pid}" not in ("0bda:b812", "2357:0138"):
+            die(f"{what} adapter {bus}-{port} is {vid}:{pid}, expected an 8812BU (0bda:b812)")
     return {"tx_bus": tx_bus, "tx_port": tx_port, "atten": atten,
             "tx_paths": cfg["tx_paths"], "channels": chans, "cfg": cfg}
 

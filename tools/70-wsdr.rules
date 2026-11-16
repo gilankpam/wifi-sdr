@@ -7,3 +7,5 @@
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="b812", TAG+="uaccess", MODE="0660", GROUP="plugdev"
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="c812", TAG+="uaccess", MODE="0660", GROUP="plugdev"
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="a81a", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+# OEM-branded 8812BU (the alias table in src/session.h): TP-Link Archer T3U Plus
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2357", ATTRS{idProduct}=="0138", TAG+="uaccess", MODE="0660", GROUP="plugdev"
