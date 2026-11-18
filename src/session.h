@@ -32,6 +32,8 @@ struct UsbAlias {
 };
 inline constexpr UsbAlias kUsbAliases[] = {
     {0x2357, 0x0138, kPid8812bu}, // TP-Link Archer T3U Plus
+    {0x2357, 0x0115, kPid8812bu}, // TP-Link Archer T4U v3 (tested in gilankpam/kepyur)
+    {0x2357, 0x012d, kPid8812bu}, // TP-Link Archer T3U (the same chip; not yet tested)
 };
 
 // The Realtek pid a USB descriptor stands for: its own pid under 0bda, an alias's, else 0.
