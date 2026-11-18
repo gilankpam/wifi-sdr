@@ -903,7 +903,7 @@ int run_tx(Args a) {
     } else if (a.mode == "fwfsk") {
       Cpu8822b cpu(s.reg());
       cpu.load(txfsk8822b_bin, txfsk8822b_bin_len);
-      s.tune(a.open.channel, a.open.bw);
+      s.tune(a.open.channel, a.open.bw, a.open.offset);
       reglog.bb_m(0x0838, 0xff, 0x6d);
       reglog.bb_m(0x0800, 1u << 25, 0x1);
       reglog.bb_m(0x0a00, 0x3, 0x0);

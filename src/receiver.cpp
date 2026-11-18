@@ -42,12 +42,15 @@ int Receiver::channel_for(double freq, int width) {
   return std::clamp(static_cast<int>(std::lround((mhz - 5000) / 5)), lo, hi);
 }
 
-// Stream runs are numbered across every Receiver of the process: a consumer that resets on a new
-// gen (a spectrum, a frame finder) must see one after a close and reopen too, where a per-receiver
-// count would start again at 1 and could repeat the last run's number.
-static uint32_t next_gen() {
-  static std::atomic<uint32_t> n{0};
-  return ++n;
+// Stream runs: each Receiver counts its own up by one (a consumer that keeps only the low byte, as
+// wsdr-studio's rows do, always sees the next run change it), starting above every number any Receiver
+// of the process has used, so a close and reopen never repeats the last run's number (a consumer that
+// resets on a new gen, like a spectrum, would keep the old run's frequency range).
+static std::atomic<uint32_t> g_gen_max{0};
+static void note_gen(uint32_t g) {
+  uint32_t m = g_gen_max.load();
+  while (m < g && !g_gen_max.compare_exchange_weak(m, g)) {
+  }
 }
 
 double Receiver::centre_of(int centre) { return devourer::chan_to_freq(centre) * 1e6; }
@@ -58,6 +61,8 @@ Receiver::Primary Receiver::primary_for(int centre, int width) {
   const bool g2 = centre <= 14;
   if (width == 40)
     return !g2 || centre >= 3 ? Primary{centre - 2, 1} : Primary{centre + 2, 2};
+  // (80 MHz: the 8822B only; devourer's 8822C/E path ignores the offset there, always +6, and
+  // width_of keeps those at 40 MHz)
   if (!g2 || centre >= 7)
     return {centre - 6, 1};
   return centre >= 3 ? Primary{centre - 2, 2} : Primary{centre + 2, 3};
@@ -94,7 +99,8 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   o.bus = bus;
   o.port = port;
   o.bw = cu && !initial.allow_gapped ? 20 : width_of(initial, cu); // 8812CU at 40 MS/s only gapped
-  const Primary p = primary_for(channel_for(initial.freq, o.bw), o.bw);
+  const int centre = channel_for(initial.freq, o.bw);
+  const Primary p = primary_for(centre, o.bw);
   o.channel = p.channel;
   o.offset = p.offset;
   o.thermal_track = false; // no host register traffic while streaming
@@ -122,8 +128,9 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   _caps.paths = 2; // the 8822B streams kDmaBothPaths8822b (path B costs no extra USB bandwidth)
   _caps.gain_step = gain_step(cu);
   _caps.gain_max = gain_max(cu);
-  _hw_channel = channel_for(initial.freq, o.bw);
+  _hw_channel = centre;
   _hw_width = o.bw;
+  _gen = g_gen_max.load(); // (the first run is numbered above every earlier one)
   _s = std::move(s);
   _open = true;
   std::lock_guard<std::mutex> l(_m);
@@ -234,7 +241,8 @@ void Receiver::worker() {
     {
       std::lock_guard<std::mutex> l(_m);
       cur = _set;
-      gen = next_gen();
+      gen = ++_gen;
+      note_gen(gen);
       cfg = _cfg;
       _st.state = RxState::Starting;
     }

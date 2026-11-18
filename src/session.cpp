@@ -18,10 +18,10 @@ static ChannelWidth_t width_of(int bw) {
   }
 }
 
-// offset -1: 1 at 40/80 MHz (the centre above the primary: +2 / +6 channels); 0 at 20 MHz
+// offset: devourer ChannelOffset at 40/80 MHz (1: the centre above the primary, +2 / +6 channels)
 static SelectedChannel selected(int channel, int bw, int offset) {
   return SelectedChannel{.Channel = static_cast<uint8_t>(channel),
-                         .ChannelOffset = static_cast<uint8_t>(bw <= 20 ? 0 : offset < 0 ? 1 : offset),
+                         .ChannelOffset = static_cast<uint8_t>(bw <= 20 ? 0 : offset),
                          .ChannelWidth = width_of(bw)};
 }
 

@@ -75,7 +75,7 @@ using BankSink = std::function<void(const uint8_t *bank, size_t bytes, const Ban
 struct RxStatus {
   RxState state = RxState::Closed;
   uint64_t banks = 0, restarts = 0;
-  int channel = 0, width = 20;
+  int channel = 0, width = 20; // channel: the RF's centre channel (Receiver::channel_for), not the primary
   double centre_hz = 0, fs = 0;
   std::string error;     // last fault (cleared on a clean run start)
   std::string last_fault; // why the stream last restarted; kept until the next open (error is cleared
@@ -138,7 +138,7 @@ private:
   RxCaps _caps;
   mutable std::mutex _m; // settings, status strings
   RxSettings _set;
-  uint32_t _cfg = 0;
+  uint32_t _gen = 0, _cfg = 0;
   std::chrono::steady_clock::time_point _last_change{};
   RxStatus _st;
   int _hw_channel = 0, _hw_width = 20;
