@@ -27,9 +27,10 @@ runs at 5 MS/s with zero faults, `evidence/phase6/`). Its board has no 2.4 GHz f
 there, but streams the ADC floor. Use it on 5 GHz.
 ² Same chip setting as on USB 3; the two-path measurements were made on USB 3.
 
-OEM-branded 8812BU: the **TP-Link Archer T3U Plus** (`2357:0138`) is an RTL8812BU under TP-Link's vendor id and
-works as the 8812BU rows above. Select it as `--pid 0xb812` (the alias table in `src/session.h`), not by the
-`0138` that `lsusb` shows; it needs its own line in `tools/70-wsdr.rules`.
+OEM-branded 8812BU: the **TP-Link Archer T3U Plus** (`2357:0138`) and **Archer T4U v3** (`2357:0115`, tested in
+[kepyur](https://github.com/gilankpam/kepyur)) are RTL8812BUs under TP-Link's vendor id and work as the 8812BU rows
+above; the **Archer T3U** (`2357:012d`) carries the same chip but is untested. Select them as `--pid 0xb812` (the
+alias table in `src/session.h`), not by the id that `lsusb` shows; each needs its own line in `tools/70-wsdr.rules`.
 
 Not supported: the **RTL8812AU** (`0bda:8812`, RTL8812A, Jaguar1) and the RTL8821AU have no LA block
 (`0x7c0` never latches the arm bits; devourer reports `no_la_block`, `external/devourer/docs/la-capture.md`),

@@ -96,7 +96,9 @@ public:
 
   // Blocking (~5 s bring-up). Throws OpenError (not found / permission / busy) or runtime_error.
   // bus/port pick one of several identical adapters (port path as "1" or "1.2"; -1/"" = any).
-  void open(uint16_t pid, const RxSettings &initial = {}, int bus = -1, const std::string &port = {});
+  // sys_fd >= 0: open the adapter behind this usbfs fd (Android) instead of scanning (OpenOpts::sys_fd).
+  void open(uint16_t pid, const RxSettings &initial = {}, int bus = -1, const std::string &port = {},
+            int sys_fd = -1);
   void close(); // stop + release the adapter
   bool is_open() const { return _open; }
   RxCaps caps() const { return _caps; }

@@ -32,6 +32,8 @@ struct UsbAlias {
 };
 inline constexpr UsbAlias kUsbAliases[] = {
     {0x2357, 0x0138, kPid8812bu}, // TP-Link Archer T3U Plus
+    {0x2357, 0x0115, kPid8812bu}, // TP-Link Archer T4U v3 (tested in gilankpam/kepyur)
+    {0x2357, 0x012d, kPid8812bu}, // TP-Link Archer T3U (the same chip; not yet tested)
 };
 
 // The Realtek pid a USB descriptor stands for: its own pid under 0bda, an alias's, else 0.
@@ -59,6 +61,10 @@ struct OpenOpts {
   int offset = 1;     // devourer ChannelOffset at 40/80 MHz (where the centre sits from the primary; 1: above)
   bool reset = true;  // libusb_reset_device before claim (devourer default)
   bool thermal_track = true; // devourer's ~2 s RF thermal tick; off for timing-critical probes
+  int sys_fd = -1;    // >= 0: an already-open usbfs fd (Android UsbDeviceConnection.getFileDescriptor()),
+                      // wrapped with libusb_wrap_sys_device instead of scanning the bus (bus/port unused; the
+                      // device must still match vid/pid; no USB reset, whatever `reset` says). The caller keeps the
+                      // fd open for the session's lifetime.
 };
 
 // Session::open failures the caller can act on (e.g. "install the udev rule" for Permission).

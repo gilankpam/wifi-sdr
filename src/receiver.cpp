@@ -83,7 +83,7 @@ void Receiver::set_state(RxState s, const std::string &err) {
     _st.error = err;
 }
 
-void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std::string &port) {
+void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std::string &port, int sys_fd) {
   close();
   if (initial.rate_sel < 0 || initial.rate_sel > 5)
     throw std::invalid_argument("rate_sel must be 0..5");
@@ -98,6 +98,7 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   o.pid = pid;
   o.bus = bus;
   o.port = port;
+  o.sys_fd = sys_fd; // (Session::open then skips the USB reset)
   o.bw = cu && !initial.allow_gapped ? 20 : width_of(initial, cu); // 8812CU at 40 MS/s only gapped
   const int centre = channel_for(initial.freq, o.bw);
   const Primary p = primary_for(centre, o.bw);

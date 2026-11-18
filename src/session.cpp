@@ -36,11 +36,28 @@ void Session::open(const OpenOpts &o) {
   if (!o.pid)
     throw std::invalid_argument("pid required");
   libusb_context *ctx = nullptr;
+#ifdef __ANDROID__
+  // no bus scan (the app may only touch the device it was granted). Process-wide in libusb: fine in an
+  // Android app, which opens by fd only; a desktop build keeps discovery (wrapping an fd works with it).
+  // It reaches a context made by libusb_init(&ctx) from libusb 1.0.27 on (kepyur builds libusb's own tree).
+  if (o.sys_fd >= 0)
+    libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+#endif
   if (libusb_init(&ctx) < 0)
     throw std::runtime_error("libusb_init failed");
   _s.adopt_context(ctx);
   libusb_device_handle *h = nullptr;
-  {
+  if (o.sys_fd >= 0) {
+    const int rc = libusb_wrap_sys_device(ctx, static_cast<intptr_t>(o.sys_fd), &h);
+    if (rc != 0)
+      throw OpenError(OpenError::Other, std::string("libusb_wrap_sys_device: ") + libusb_error_name(rc));
+    libusb_device_descriptor d{};
+    if (libusb_get_device_descriptor(libusb_get_device(h), &d) != 0 ||
+        !usb_id_matches(o.vid, o.pid, d.idVendor, d.idProduct)) {
+      libusb_close(h);
+      throw OpenError(OpenError::NotFound, "the fd is not the requested adapter");
+    }
+  } else {
     libusb_device **list = nullptr;
     const ssize_t n = libusb_get_device_list(ctx, &list);
     int rc = LIBUSB_ERROR_NOT_FOUND;
@@ -71,7 +88,8 @@ void Session::open(const OpenOpts &o) {
       throw OpenError(OpenError::Other, std::string("libusb_open: ") + libusb_error_name(rc));
   }
   std::shared_ptr<devourer::UsbDeviceLock> lock;
-  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), _log, o.reset,
+  // (never a USB reset on a granted fd: it can re-enumerate the device and invalidate the fd)
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), _log, o.reset && o.sys_fd < 0,
                                            lock) != 0) {
     _s.adopt_handle(h);
     throw OpenError(OpenError::Busy, "claim failed (adapter busy?)");
@@ -97,6 +115,24 @@ void Session::open(const OpenOpts &o) {
   _reg = std::make_unique<Reg>(h, _ss);
 }
 
-void Session::tune(int channel, int bw, int offset) { radio()->SetMonitorChannel(selected(channel, bw, offset)); }
+void Session::tune(int channel, int bw, int offset) {
+  radio()->SetMonitorChannel(selected(channel, bw, offset));
+  // The 8822B RF synth re-latches its channel state only on a change of RF18's channel byte (devourer's
+  // set_channel_bw, the 5/10 MHz comment). A width change on the same centre channel (40 MHz at primary
+  // 34 -> 20 MHz at 36: both 36) rewrites only the BW bits, and RX stays deaf until the next channel
+  // change. So every retune writes a different channel byte first, then the real value, on both paths
+  // (3-wire LSSI writes as devourer's rf_write; RF18 read back through the direct window).
+  // TODO: this belongs in devourer: HalJaguar2.cpp set_channel_bw already forces this same edge for
+  // 5/10 MHz (`if (bw == 5 || bw == 6)`); forcing it at every width there makes this block go.
+  if (_chip == "RTL8822B") {
+    for (int path = 0; path < 2; path++) {
+      const uint16_t lssi = path ? 0x0E90 : 0x0C90;
+      const uint32_t rf18 = _reg->r32(static_cast<uint16_t>((path ? 0x2C00 : 0x2800) + (0x18 << 2))) & 0xFFFFFu;
+      const uint32_t alt = (rf18 & ~0xFFu) | ((rf18 & 0xFF) == 1 ? 2u : 1u);
+      _reg->w32(lssi, (0x18u << 20) | alt);
+      _reg->w32(lssi, (0x18u << 20) | rf18);
+    }
+  }
+}
 
 } // namespace wsdr
