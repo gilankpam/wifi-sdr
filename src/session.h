@@ -54,8 +54,9 @@ struct OpenOpts {
   uint16_t pid = 0;   // required
   int bus = -1;       // optional: only the adapter on this USB bus ...
   std::string port;   // ... and port path ("1", "1.2"); empty = any
-  int channel = 36;
+  int channel = 36;   // primary 20 MHz channel
   int bw = 20;        // 20 / 40 / 80
+  int offset = 1;     // devourer ChannelOffset at 40/80 MHz (where the centre sits from the primary; 1: above)
   bool reset = true;  // libusb_reset_device before claim (devourer default)
   bool thermal_track = true; // devourer's ~2 s RF thermal tick; off for timing-critical probes
 };
@@ -79,8 +80,8 @@ public:
   Reg &reg() { return *_reg; }
   bool superspeed() const { return _ss; }
   std::string chip() const { return _chip; }
-  // Retune via devourer (full SetMonitorChannel path).
-  void tune(int channel, int bw = 20);
+  // Retune via devourer (full SetMonitorChannel path). channel: the primary; offset as OpenOpts::offset.
+  void tune(int channel, int bw = 20, int offset = 1);
 
 private:
   Logger_t _log;

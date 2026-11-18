@@ -26,30 +26,46 @@ const char *rx_state_name(RxState s) {
   return "?";
 }
 
-// Primary 20 MHz channel for a requested centre. devourer's Channel is the primary channel with the
-// 40 MHz channel above it, so at 40 MHz width the centre is primary + 10 MHz (measured, wide-tap.md);
-// at 80 MHz width primary + 30 MHz, from any primary (measured at ch 1, 3, 36, 98, 100).
+// The RF is tuned to the centre channel. devourer takes the primary 20 MHz channel and where the
+// centre sits from it (ChannelOffset): at 40 MHz 1 = +2 channels (+10 MHz) and 2 = -2; at 80 MHz
+// 1..4 = +6/+2/-2/-6 (+30 MHz measured from primaries 1, 3, 36, 98, 100; wide-tap.md). Centres above
+// the primary are used wherever the primary stays a channel; at the bottom of 2.4 GHz a wide span still
+// centres on channel 1 (primary above it), so 40/80 MHz spans reach 2392/2372 MHz there, and 2504/2524
+// MHz centred on channel 14. 5 GHz centres keep the primaries 16..233 (5080-6165 MHz).
 int Receiver::channel_for(double freq, int width) {
   const double mhz = freq / 1e6;
-  if (width == 80) {
-    if (mhz < 3700)
-      return std::clamp(static_cast<int>(std::lround((mhz - 30 - 2407) / 5)), 1, 5);
-    return std::clamp(static_cast<int>(std::lround((mhz - 30 - 5000) / 5)), 16, 221);
-  }
-  if (width == 40) {
-    if (mhz < 3700)
-      return std::clamp(static_cast<int>(std::lround((mhz - 10 - 2407) / 5)), 1, 9);
-    return std::clamp(static_cast<int>(std::lround((mhz - 10 - 5000) / 5)), 16, 229);
-  }
   if (mhz < 3700) {
     const int g = std::clamp(static_cast<int>(std::lround((mhz - 2407) / 5)), 1, 13);
     return std::abs(mhz - 2484) < std::abs(mhz - devourer::chan_to_freq(g)) ? 14 : g;
   }
-  return std::clamp(static_cast<int>(std::lround((mhz - 5000) / 5)), 16, 233);
+  const int lo = width == 80 ? 22 : width == 40 ? 18 : 16, hi = width == 80 ? 227 : width == 40 ? 231 : 233;
+  return std::clamp(static_cast<int>(std::lround((mhz - 5000) / 5)), lo, hi);
 }
 
-double Receiver::centre_of(int channel, int width) {
-  return devourer::chan_to_freq(channel) * 1e6 + (width == 80 ? 30e6 : width == 40 ? 10e6 : 0);
+// Stream runs: each Receiver counts its own up by one (a consumer that keeps only the low byte, as
+// wsdr-studio's rows do, always sees the next run change it), starting above every number any Receiver
+// of the process has used, so a close and reopen never repeats the last run's number (a consumer that
+// resets on a new gen, like a spectrum, would keep the old run's frequency range).
+static std::atomic<uint32_t> g_gen_max{0};
+static void note_gen(uint32_t g) {
+  uint32_t m = g_gen_max.load();
+  while (m < g && !g_gen_max.compare_exchange_weak(m, g)) {
+  }
+}
+
+double Receiver::centre_of(int centre) { return devourer::chan_to_freq(centre) * 1e6; }
+
+Receiver::Primary Receiver::primary_for(int centre, int width) {
+  if (width <= 20)
+    return {centre, 0};
+  const bool g2 = centre <= 14;
+  if (width == 40)
+    return !g2 || centre >= 3 ? Primary{centre - 2, 1} : Primary{centre + 2, 2};
+  // (80 MHz: the 8822B only; devourer's 8822C/E path ignores the offset there, always +6, and
+  // width_of keeps those at 40 MHz)
+  if (!g2 || centre >= 7)
+    return {centre - 6, 1};
+  return centre >= 3 ? Primary{centre - 2, 2} : Primary{centre + 2, 3};
 }
 
 int Receiver::igi_for(double db, bool cu) {
@@ -83,7 +99,10 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   o.bus = bus;
   o.port = port;
   o.bw = cu && !initial.allow_gapped ? 20 : width_of(initial, cu); // 8812CU at 40 MS/s only gapped
-  o.channel = channel_for(initial.freq, o.bw);
+  const int centre = channel_for(initial.freq, o.bw);
+  const Primary p = primary_for(centre, o.bw);
+  o.channel = p.channel;
+  o.offset = p.offset;
   o.thermal_track = false; // no host register traffic while streaming
   auto s = std::make_unique<Session>(_log);
   try {
@@ -109,8 +128,9 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   _caps.paths = 2; // the 8822B streams kDmaBothPaths8822b (path B costs no extra USB bandwidth)
   _caps.gain_step = gain_step(cu);
   _caps.gain_max = gain_max(cu);
-  _hw_channel = o.channel;
+  _hw_channel = centre;
   _hw_width = o.bw;
+  _gen = g_gen_max.load(); // (the first run is numbered above every earlier one)
   _s = std::move(s);
   _open = true;
   std::lock_guard<std::mutex> l(_m);
@@ -222,16 +242,18 @@ void Receiver::worker() {
       std::lock_guard<std::mutex> l(_m);
       cur = _set;
       gen = ++_gen;
+      note_gen(gen);
       cfg = _cfg;
       _st.state = RxState::Starting;
     }
     const int width = width_of(cur, _caps.cu);
     const int ch = channel_for(cur.freq, width);
     const double fs = rate_of(cur.rate_sel);
-    const double centre = centre_of(ch, width);
+    const double centre = centre_of(ch);
     try {
       if (ch != _hw_channel || width != _hw_width) {
-        _s->tune(ch, width);
+        const Primary p = primary_for(ch, width);
+        _s->tune(p.channel, width, p.offset);
         _hw_channel = ch;
         _hw_width = width;
       }

@@ -53,9 +53,9 @@
 #include <thread>
 #include <vector>
 
-#include "ChannelFreq.h"
 #include "iqdsp.h"
 #include "logger.h"
+#include "receiver.h"
 #include "session.h"
 #include "stream88xx.h"
 #include "stream_cu.h"
@@ -87,23 +87,6 @@ constexpr double kAnalogBw = 18.4e6; // measured -3 dB width of the LA tap (+-9.
 
 int igi_for(double db, bool cu) {
   return std::clamp(0x50 - static_cast<int>(std::lround(db / gain_step(cu))), 0x1C, 0x50);
-}
-
-// Nearest synthesizer channel (5 MHz grid) for a frequency; same rule as wsdr_tcp.
-// Primary 20 MHz channel for a requested centre. devourer's Channel is the primary channel with the
-// 40 MHz channel above it, so at 40 MHz width the centre is primary + 10 MHz (measured, wide-tap.md).
-int channel_for(double freq, int width = 20) {
-  const double mhz = freq / 1e6;
-  if (width == 40) {
-    if (mhz < 3700)
-      return std::clamp(static_cast<int>(std::lround((mhz - 10 - 2407) / 5)), 1, 9);
-    return std::clamp(static_cast<int>(std::lround((mhz - 10 - 5000) / 5)), 16, 229);
-  }
-  if (mhz < 3700) {
-    const int g = std::clamp(static_cast<int>(std::lround((mhz - 2407) / 5)), 1, 13);
-    return std::abs(mhz - 2484) < std::abs(mhz - devourer::chan_to_freq(g)) ? 14 : g;
-  }
-  return std::clamp(static_cast<int>(std::lround((mhz - 5000) / 5)), 16, 233);
 }
 
 // Single-producer / single-consumer sample ring (complex float, LA units). Overflow drops the
@@ -193,7 +176,7 @@ public:
       o.port = args.at("port");
     _cu = jaguar3_pid(o.pid);
     _eu = o.pid == kPid8812eu;
-    o.channel = channel_for(_set.freq);
+    o.channel = Receiver::channel_for(_set.freq, 20); // (opens at 20 MHz: the centre is the primary)
     o.thermal_track = false; // no host register traffic while streaming
     _s = std::make_unique<Session>(std::make_shared<Logger>());
     _s->open(o); // throws on failure; SoapySDR reports it to the client
@@ -456,9 +439,9 @@ private:
       _restart = false;
       const Settings cur = get();
       const int width = width_of(cur);
-      const int ch = channel_for(cur.freq, width);
+      const int ch = Receiver::channel_for(cur.freq, width); // the centre channel (Receiver's mapping)
       const double src = rate_of(cur.rate_sel);
-      const double centre = devourer::chan_to_freq(ch) * 1e6 + (width == 40 ? 10e6 : 0);
+      const double centre = Receiver::centre_of(ch);
       const double shift = cur.freq - centre;
       if (std::abs(shift) > 0.05 * src)
         SoapySDR::logf(SOAPY_SDR_WARNING,
@@ -466,11 +449,13 @@ private:
                        cur.freq / 1e6, shift / 1e3);
       try {
         if (ch != _channel || width != _width) {
-          _s->tune(ch, width);
+          const Receiver::Primary p = Receiver::primary_for(ch, width);
+          _s->tune(p.channel, width, p.offset);
           _channel = ch;
           _width = width;
         }
       } catch (const std::exception &e) {
+        _channel = 0; // devourer may have half-programmed the new channel: tune again next time (as Receiver)
         SoapySDR::logf(SOAPY_SDR_ERROR, "wsdr: retune to channel %d failed: %s", ch, e.what());
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;

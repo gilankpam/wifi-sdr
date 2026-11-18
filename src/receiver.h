@@ -75,7 +75,7 @@ using BankSink = std::function<void(const uint8_t *bank, size_t bytes, const Ban
 struct RxStatus {
   RxState state = RxState::Closed;
   uint64_t banks = 0, restarts = 0;
-  int channel = 0, width = 20;
+  int channel = 0, width = 20; // channel: the RF's centre channel (Receiver::channel_for), not the primary
   double centre_hz = 0, fs = 0;
   std::string error;     // last fault (cleared on a clean run start)
   std::string last_fault; // why the stream last restarted; kept until the next open (error is cleared
@@ -117,8 +117,14 @@ public:
   int lowest_rate_sel(const RxSettings &s) const {
     return s.allow_gapped ? std::min(_caps.min_rate_sel, _caps.gapped_min_rate_sel) : _caps.min_rate_sel;
   }
-  static int channel_for(double freq, int width);   // primary channel (5 MHz grid)
-  static double centre_of(int channel, int width);  // hardware centre for that primary channel
+  // The hardware centre channel (the RF's channel; 5 MHz grid) for a requested centre at a width, and
+  // the primary 20 MHz channel + devourer ChannelOffset that put the centre there.
+  struct Primary {
+    int channel, offset;
+  };
+  static int channel_for(double freq, int width);
+  static Primary primary_for(int centre, int width);
+  static double centre_of(int centre); // Hz
   static int igi_for(double db, bool cu);
   static double gain_step(bool cu) { return cu ? 1.0 : 0.95; }
   static double gain_max(bool cu) { return (0x50 - 0x1C) * gain_step(cu); }
