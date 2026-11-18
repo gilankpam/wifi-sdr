@@ -122,6 +122,8 @@ void Session::tune(int channel, int bw, int offset) {
   // 34 -> 20 MHz at 36: both 36) rewrites only the BW bits, and RX stays deaf until the next channel
   // change. So every retune writes a different channel byte first, then the real value, on both paths
   // (3-wire LSSI writes as devourer's rf_write; RF18 read back through the direct window).
+  // TODO: this belongs in devourer: HalJaguar2.cpp set_channel_bw already forces this same edge for
+  // 5/10 MHz (`if (bw == 5 || bw == 6)`); forcing it at every width there makes this block go.
   if (_chip == "RTL8822B") {
     for (int path = 0; path < 2; path++) {
       const uint16_t lssi = path ? 0x0E90 : 0x0C90;
