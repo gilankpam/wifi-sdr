@@ -61,6 +61,9 @@ struct OpenOpts {
   int offset = 1;     // devourer ChannelOffset at 40/80 MHz (where the centre sits from the primary; 1: above)
   bool reset = true;  // libusb_reset_device before claim (devourer default)
   bool thermal_track = true; // devourer's ~2 s RF thermal tick; off for timing-critical probes
+  int sys_fd = -1;    // >= 0: an already-open usbfs fd (Android UsbDeviceConnection.getFileDescriptor()),
+                      // wrapped with libusb_wrap_sys_device instead of scanning the bus (bus/port unused; the
+                      // device must still match vid/pid). The caller keeps the fd open for the session's lifetime.
 };
 
 // Session::open failures the caller can act on (e.g. "install the udev rule" for Permission).

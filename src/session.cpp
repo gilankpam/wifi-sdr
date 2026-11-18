@@ -36,11 +36,23 @@ void Session::open(const OpenOpts &o) {
   if (!o.pid)
     throw std::invalid_argument("pid required");
   libusb_context *ctx = nullptr;
+  if (o.sys_fd >= 0) // no bus scan (Android: the app may only touch the device it was granted)
+    libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
   if (libusb_init(&ctx) < 0)
     throw std::runtime_error("libusb_init failed");
   _s.adopt_context(ctx);
   libusb_device_handle *h = nullptr;
-  {
+  if (o.sys_fd >= 0) {
+    const int rc = libusb_wrap_sys_device(ctx, static_cast<intptr_t>(o.sys_fd), &h);
+    if (rc != 0)
+      throw OpenError(OpenError::Other, std::string("libusb_wrap_sys_device: ") + libusb_error_name(rc));
+    libusb_device_descriptor d{};
+    if (libusb_get_device_descriptor(libusb_get_device(h), &d) != 0 ||
+        !usb_id_matches(o.vid, o.pid, d.idVendor, d.idProduct)) {
+      libusb_close(h);
+      throw OpenError(OpenError::NotFound, "the fd is not the requested adapter");
+    }
+  } else {
     libusb_device **list = nullptr;
     const ssize_t n = libusb_get_device_list(ctx, &list);
     int rc = LIBUSB_ERROR_NOT_FOUND;

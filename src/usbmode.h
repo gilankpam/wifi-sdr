@@ -26,5 +26,8 @@ Usb3Switch request_usb3(uint16_t pid, int bus, const std::string &port, std::str
 // Back to USB 2 without a replug (the vendor driver's 3 -> 2 switch; tests of the USB 2 paths). The
 // chip then comes up at USB 2, and request_usb3 can switch it again.
 Usb3Switch request_usb2(uint16_t pid, int bus, const std::string &port, std::string *detail = nullptr);
+// The USB 3 switch on an already-open usbfs fd (Android UsbDeviceConnection); no bus scan. The fd's device
+// disconnects on Requested: close the connection and wait for the new (SuperSpeed) device.
+Usb3Switch request_usb3_fd(int sys_fd, std::string *detail = nullptr);
 
 } // namespace wsdr

@@ -36,6 +36,8 @@ std::string port_path(libusb_device *d) {
 } // namespace
 
 namespace {
+Usb3Switch switch_mode(libusb_device_handle *h, bool usb3, std::string *detail);
+
 // The switch both ways: halmac's set_usb_mode_88xx (PAD_CTRL2 USB23_SW_MODE 2 = USB 3, 1 = USB 2), which
 // rtw88 uses for USB 2 -> 3 (plus its 0x10C3 write) and the vendor driver also for 3 -> 2.
 Usb3Switch request_mode(uint16_t pid, int bus, const std::string &port, bool usb3, std::string *detail) {
@@ -71,6 +73,16 @@ Usb3Switch request_mode(uint16_t pid, int bus, const std::string &port, bool usb
   if (const int rc = libusb_open(dev, &h); rc != 0)
     return fail(std::string("open: ") + libusb_error_name(rc));
   std::unique_ptr<libusb_device_handle, void (*)(libusb_device_handle *)> h_guard(h, libusb_close);
+  return switch_mode(h, usb3, detail);
+}
+
+// The switch on an open handle (the caller owns it).
+Usb3Switch switch_mode(libusb_device_handle *h, bool usb3, std::string *detail) {
+  const auto fail = [&](const std::string &why) {
+    if (detail)
+      *detail = why;
+    return Usb3Switch::Failed;
+  };
   libusb_set_auto_detach_kernel_driver(h, 1);
   if (const int rc = libusb_claim_interface(h, 0); rc != 0)
     return fail(std::string("claim: ") + libusb_error_name(rc)); // held by someone else: left alone
@@ -111,6 +123,29 @@ Usb3Switch request_mode(uint16_t pid, int bus, const std::string &port, bool usb
 
 Usb3Switch request_usb3(uint16_t pid, int bus, const std::string &port, std::string *detail) {
   return request_mode(pid, bus, port, true, detail);
+}
+
+Usb3Switch request_usb3_fd(int sys_fd, std::string *detail) {
+  const auto fail = [&](const std::string &why) {
+    if (detail)
+      *detail = why;
+    return Usb3Switch::Failed;
+  };
+  libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+  libusb_context *ctx = nullptr;
+  if (libusb_init(&ctx) != 0)
+    return fail("libusb_init failed");
+  std::unique_ptr<libusb_context, void (*)(libusb_context *)> ctx_guard(ctx, libusb_exit);
+  libusb_device_handle *h = nullptr;
+  if (const int rc = libusb_wrap_sys_device(ctx, static_cast<intptr_t>(sys_fd), &h); rc != 0)
+    return fail(std::string("wrap: ") + libusb_error_name(rc));
+  std::unique_ptr<libusb_device_handle, void (*)(libusb_device_handle *)> h_guard(h, libusb_close);
+  libusb_device_descriptor dd{};
+  if (libusb_get_device_descriptor(libusb_get_device(h), &dd) != 0 || realtek_pid(dd.idVendor, dd.idProduct) != kPid8812bu)
+    return Usb3Switch::Unsupported;
+  if (libusb_get_device_speed(libusb_get_device(h)) >= LIBUSB_SPEED_SUPER)
+    return Usb3Switch::NotNeeded;
+  return switch_mode(h, true, detail);
 }
 
 Usb3Switch request_usb2(uint16_t pid, int bus, const std::string &port, std::string *detail) {
