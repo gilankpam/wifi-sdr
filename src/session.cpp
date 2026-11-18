@@ -18,6 +18,13 @@ static ChannelWidth_t width_of(int bw) {
   }
 }
 
+// offset -1: 1 at 40/80 MHz (the centre above the primary: +2 / +6 channels); 0 at 20 MHz
+static SelectedChannel selected(int channel, int bw, int offset) {
+  return SelectedChannel{.Channel = static_cast<uint8_t>(channel),
+                         .ChannelOffset = static_cast<uint8_t>(bw <= 20 ? 0 : offset < 0 ? 1 : offset),
+                         .ChannelWidth = width_of(bw)};
+}
+
 Session::Session(Logger_t logger) : _log(std::move(logger)), _s(_log) {}
 
 Session::~Session() {
@@ -86,16 +93,10 @@ void Session::open(const OpenOpts &o) {
     throw std::runtime_error("CreateRadio failed");
   _s.adopt_device(std::move(dev));
   _chip = radio()->GetAdapterCaps().chip_name;
-  radio()->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(o.channel),
-                                     .ChannelOffset = static_cast<uint8_t>(o.bw > 20 ? 1 : 0),
-                                     .ChannelWidth = width_of(o.bw)});
+  radio()->InitWrite(selected(o.channel, o.bw, o.offset));
   _reg = std::make_unique<Reg>(h, _ss);
 }
 
-void Session::tune(int channel, int bw) {
-  radio()->SetMonitorChannel(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
-                                             .ChannelOffset = static_cast<uint8_t>(bw > 20 ? 1 : 0),
-                                             .ChannelWidth = width_of(bw)});
-}
+void Session::tune(int channel, int bw, int offset) { radio()->SetMonitorChannel(selected(channel, bw, offset)); }
 
 } // namespace wsdr
