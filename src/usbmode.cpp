@@ -131,7 +131,9 @@ Usb3Switch request_usb3_fd(int sys_fd, std::string *detail) {
       *detail = why;
     return Usb3Switch::Failed;
   };
-  libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+#ifdef __ANDROID__
+  libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY); // (process-wide: as in Session::open)
+#endif
   libusb_context *ctx = nullptr;
   if (libusb_init(&ctx) != 0)
     return fail("libusb_init failed");

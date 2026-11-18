@@ -36,8 +36,13 @@ void Session::open(const OpenOpts &o) {
   if (!o.pid)
     throw std::invalid_argument("pid required");
   libusb_context *ctx = nullptr;
-  if (o.sys_fd >= 0) // no bus scan (Android: the app may only touch the device it was granted)
+#ifdef __ANDROID__
+  // no bus scan (the app may only touch the device it was granted). Process-wide in libusb: fine in an
+  // Android app, which opens by fd only; a desktop build keeps discovery (wrapping an fd works with it).
+  // It reaches a context made by libusb_init(&ctx) from libusb 1.0.27 on (kepyur builds libusb's own tree).
+  if (o.sys_fd >= 0)
     libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+#endif
   if (libusb_init(&ctx) < 0)
     throw std::runtime_error("libusb_init failed");
   _s.adopt_context(ctx);
@@ -83,7 +88,8 @@ void Session::open(const OpenOpts &o) {
       throw OpenError(OpenError::Other, std::string("libusb_open: ") + libusb_error_name(rc));
   }
   std::shared_ptr<devourer::UsbDeviceLock> lock;
-  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), _log, o.reset,
+  // (never a USB reset on a granted fd: it can re-enumerate the device and invalidate the fd)
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), _log, o.reset && o.sys_fd < 0,
                                            lock) != 0) {
     _s.adopt_handle(h);
     throw OpenError(OpenError::Busy, "claim failed (adapter busy?)");

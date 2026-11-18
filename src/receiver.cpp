@@ -98,9 +98,7 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   o.pid = pid;
   o.bus = bus;
   o.port = port;
-  o.sys_fd = sys_fd;
-  if (sys_fd >= 0)
-    o.reset = false; // a USB reset can re-enumerate the device and invalidate the granted fd
+  o.sys_fd = sys_fd; // (Session::open then skips the USB reset)
   o.bw = cu && !initial.allow_gapped ? 20 : width_of(initial, cu); // 8812CU at 40 MS/s only gapped
   const int centre = channel_for(initial.freq, o.bw);
   const Primary p = primary_for(centre, o.bw);
