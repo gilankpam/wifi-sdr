@@ -42,6 +42,14 @@ int Receiver::channel_for(double freq, int width) {
   return std::clamp(static_cast<int>(std::lround((mhz - 5000) / 5)), lo, hi);
 }
 
+// Stream runs are numbered across every Receiver of the process: a consumer that resets on a new
+// gen (a spectrum, a frame finder) must see one after a close and reopen too, where a per-receiver
+// count would start again at 1 and could repeat the last run's number.
+static uint32_t next_gen() {
+  static std::atomic<uint32_t> n{0};
+  return ++n;
+}
+
 double Receiver::centre_of(int centre) { return devourer::chan_to_freq(centre) * 1e6; }
 
 Receiver::Primary Receiver::primary_for(int centre, int width) {
@@ -226,7 +234,7 @@ void Receiver::worker() {
     {
       std::lock_guard<std::mutex> l(_m);
       cur = _set;
-      gen = ++_gen;
+      gen = next_gen();
       cfg = _cfg;
       _st.state = RxState::Starting;
     }

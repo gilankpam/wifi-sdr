@@ -138,7 +138,7 @@ private:
   RxCaps _caps;
   mutable std::mutex _m; // settings, status strings
   RxSettings _set;
-  uint32_t _gen = 0, _cfg = 0;
+  uint32_t _cfg = 0;
   std::chrono::steady_clock::time_point _last_change{};
   RxStatus _st;
   int _hw_channel = 0, _hw_width = 20;
