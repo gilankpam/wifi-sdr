@@ -124,7 +124,9 @@ public:
   void start(BankSink sink); // worker thread; no-op if running (after Lost/Error: a new worker)
   void stop();               // joins the worker
   // Takes effect between stream runs. A change that leaves the hardware as it is (e.g. a frequency
-  // inside the same 5 MHz synthesizer step) is recorded without restarting the stream.
+  // inside the same 5 MHz synthesizer step) is recorded without restarting the stream. So is a change
+  // of gain_db alone on an 8812BU that streams continuously at fixed gain: the stream applies it while
+  // it runs, about 6 banks later (1.2 ms at 40 MS/s), and gen / cfg stay as they are.
   void set(const RxSettings &s);
   RxSettings settings() const;
   RxStatus status() const;
@@ -146,6 +148,8 @@ public:
 private:
   void worker();
   void set_state(RxState s, const std::string &err = {});
+  // The stream run for these settings follows _live_igi (StreamCfg::live_igi).
+  bool live_gain(const RxSettings &x) const { return !_caps.cu && !x.agc && x.rate_sel >= _caps.min_rate_sel; }
 
   Logger_t _log;
   std::unique_ptr<Session> _s;
@@ -158,6 +162,7 @@ private:
   int _hw_channel = 0, _hw_width = 20;
   BankSink _sink;
   std::atomic<bool> _active{false}, _restart{false}, _open{false};
+  std::atomic<int> _live_igi{0}; // IGI of _set.gain_db, for the running stream
   std::thread _worker;
 };
 

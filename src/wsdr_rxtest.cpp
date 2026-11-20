@@ -2,6 +2,9 @@
 // wsdr_rxtest — hardware check of wsdr::Receiver (the app-facing API):
 //   wsdr_rxtest --pid 0xb812|0xc812|0xa81a [--freq 5190e6] [--rate 1] [--seconds 10] [--retune 5230e6] [--gapped]
 //               [--sweep 5190e6:5830e6:40e6 --dwell-ms 280]   (--sweep replaces --retune)
+//               [--gain DB] [--gain-hop DB:MS]
+//   --gain-hop alternates the gain between --gain and DB every MS and prints, per stretch, the quietest
+//   bank's rms (path A, every 8th sample): on an 8812BU the level must follow with "restarts" at 0.
 //   --gapped allows rates the link cannot stream (RxSettings::allow_gapped), e.g. --rate 0 (80 MS/s).
 // Opens the adapter, streams, optionally retunes half-way, and prints status JSON once a second plus a
 // summary: banks, restarts, settings generations seen, sink time per bank (must stay tiny: it runs on
@@ -10,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +21,7 @@
 #include <thread>
 
 #include "receiver.h"
+#include "stream88xx.h"
 
 using namespace wsdr;
 using clk = std::chrono::steady_clock;
@@ -27,6 +32,8 @@ int main(int argc, char **argv) {
   set.rate_sel = 5;
   double seconds = 10, retune = 0, sw0 = 0, sw1 = 0, swstep = 0;
   int dwell_ms = 280;
+  double hop_db = -1;
+  int hop_ms = 0;
   int bus = -1;
   std::string port;
   for (int i = 1; i < argc; i++) {
@@ -40,6 +47,14 @@ int main(int argc, char **argv) {
     else if (k == "--sweep") {
       if (std::sscanf(v, "%lf:%lf:%lf", &sw0, &sw1, &swstep) != 3 || swstep <= 0 || sw1 < sw0) {
         std::fprintf(stderr, "--sweep first:last:step (Hz)\n");
+        return 2;
+      }
+      i++;
+    }
+    else if (k == "--gain") set.gain_db = std::strtod(v, nullptr), i++;
+    else if (k == "--gain-hop") {
+      if (std::sscanf(v, "%lf:%d", &hop_db, &hop_ms) != 2 || hop_db < 0 || hop_ms <= 0) {
+        std::fprintf(stderr, "--gain-hop DB:MS\n");
         return 2;
       }
       i++;
@@ -75,10 +90,21 @@ int main(int argc, char **argv) {
               "\"gain_max\":%.1f}\n", c.chip.c_str(), c.cu, c.superspeed, c.min_rate_sel, c.paths, c.gain_max);
   std::atomic<uint64_t> banks{0}, gens{0}, sink_ns{0}, sink_max_ns{0};
   std::atomic<uint32_t> last_gen{0};
+  std::atomic<uint64_t> quiet{UINT64_MAX}; // smallest bank energy since the last gain change
   static uint8_t copy[65536];
   rx.start([&](const uint8_t *bank, size_t n, const BankMeta &m) {
     const auto t = clk::now();
     std::memcpy(copy, bank, n); // what a real consumer does: copy, nothing else
+    if (hop_ms) {
+      uint64_t e = 0;
+      for (size_t i = 0; i < n; i += 64) {
+        uint64_t w;
+        std::memcpy(&w, bank + i, 8);
+        e += static_cast<uint64_t>(la_i(w) * la_i(w) + la_q(w) * la_q(w));
+      }
+      if (e < quiet)
+        quiet = e;
+    }
     if (m.gen != last_gen.exchange(m.gen))
       gens++;
     banks++;
@@ -116,7 +142,26 @@ int main(int argc, char **argv) {
     }
     std::printf("{\"ev\":\"sweep\",\"steps\":%llu}\n", static_cast<unsigned long long>(steps));
   }
-  while (swstep <= 0 && std::chrono::duration<double>(clk::now() - t0).count() < seconds) {
+  if (hop_ms) {
+    const double base_db = set.gain_db;
+    for (int k = 0; std::chrono::duration<double>(clk::now() - t0).count() < seconds; k++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(hop_ms));
+      const RxStatus st = rx.status();
+      RxSettings s = rx.settings();
+      // (the stretch's first ~6 banks are still at the gain before)
+      std::printf("{\"ev\":\"gain\",\"t\":%.3f,\"gain\":%.1f,\"quiet_rms\":%.1f,\"restarts\":%llu,\"gen\":%u}\n",
+                  std::chrono::duration<double>(clk::now() - t0).count(), s.gain_db,
+                  std::sqrt(quiet.exchange(UINT64_MAX) / 1024.0), static_cast<unsigned long long>(st.restarts), st.gen);
+      if (st.state == RxState::Lost || st.state == RxState::Error)
+        break;
+      s.gain_db = k % 2 ? base_db : hop_db;
+      rx.set(s);
+      // the change (6 banks) and the banks on their way, before the next stretch is measured
+      std::this_thread::sleep_for(std::chrono::microseconds(5000 + static_cast<long>(10 * 8192e6 / Receiver::rate_of(s.rate_sel))));
+      quiet = UINT64_MAX;
+    }
+  }
+  while (!hop_ms && swstep <= 0 && std::chrono::duration<double>(clk::now() - t0).count() < seconds) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
     if (retune > 0 && !retuned && std::chrono::duration<double>(clk::now() - t0).count() >= seconds / 2) {
       RxSettings s = rx.settings();
