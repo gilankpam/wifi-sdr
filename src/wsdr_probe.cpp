@@ -111,6 +111,9 @@ struct Args {
   std::string plan;       // tapscan: plan file
   std::string path = "a"; // stream: a, b or ab (b needs --dma 4: both paths in one word)
   int lo = 0, hi = 0xfff; // dbgscan: selector range
+  int hop_igi = -1;       // stream (spike): >= 0: alternate IGI between --igi and this while streaming
+  int hop_ms = 500;       // stream (spike): time between IGI writes
+  int hop_mode = 0;       // stream (spike): 0 m32, 1 CCA on around the write, 2 byte write, 3 as 1 but w8
 };
 
 unsigned long num(const char *s) { return std::strtoul(s, nullptr, 0); }
@@ -170,6 +173,9 @@ bool parse(int argc, char **argv, Args &a) {
       a.sets.push_back({static_cast<uint16_t>(num(sv.substr(0, eq).c_str())),
                         static_cast<uint32_t>(num(sv.substr(eq + 1).c_str()))});
     }
+    else if (k == "--igi-hop") a.hop_igi = static_cast<int>(num(v()));
+    else if (k == "--hop-mode") a.hop_mode = static_cast<int>(num(v()));
+    else if (k == "--hop-ms") a.hop_ms = static_cast<int>(num(v()));
     else if (k == "--igi") a.la.igi = static_cast<int>(std::strtol(v(), nullptr, 0));
     else if (k == "--ofdm") a.la.ofdm_off = num(v()) == 0;
     else if (k == "--nocca") a.la.no_cca = true;
@@ -897,8 +903,101 @@ int cmd_stream(Session &s, const Args &a) {
     }
   } join{done, writer};
   uint64_t n = 0;
+  // Spike: IGI rewritten between banks, on the thread that reaps the stream (no restart).
+  struct Hop { uint64_t bank; int igi; double us; uint32_t c50, e50, pre, r838; };
+  std::vector<Hop> hops;
+  const uint64_t hop_every = std::max<uint64_t>(1, static_cast<uint64_t>(a.hop_ms * 1e-3 * st.fs() / Stream8822b::kBankSamples));
+  // mode 6: one EP0 transfer per bank. 0 idle, 1 read C50 (so a write that lands with old data is a no-op),
+  // 2 write C50, 3 read C50 (differs -> 2), 4 write E50, 5 read E50 (differs -> 3).
+  int ph = 0, want_igi = 0;
+  uint32_t xfers = 0;
+  uint64_t hop_bank = 0;
   const StreamStats ss = st.run(
       [&](const uint8_t *bank, const BankInfo &bi) {
+        if (a.hop_igi >= 0 && a.hop_mode == 7) { // as 6, but step 1 reads the wanted value from the table
+          Reg &hr = s.reg();
+          if (!ph && n && n % hop_every == 0) {
+            want_igi = hops.size() % 2 ? a.la.igi : a.hop_igi;
+            ph = 1, xfers = 0, hop_bank = n;
+          }
+          if (ph) {
+            xfers++;
+            if (ph == 1) {
+              const int got = hr.r8(static_cast<uint16_t>(0x8800 + want_igi));
+              if (got != want_igi && hops.size() < 4)
+                std::fprintf(stderr, "hop: table read %02x, wanted %02x\n", got, want_igi);
+              ph = 2;
+            }
+            else if (ph == 2) hr.w8(0x0C50, static_cast<uint8_t>(want_igi)), ph = 3;
+            else if (ph == 3) ph = hr.r8(0x0C50) == want_igi ? 4 : 1;
+            else if (ph == 4) hr.w8(0x0E50, static_cast<uint8_t>(want_igi)), ph = 5;
+            else if (hr.r8(0x0E50) == want_igi) {
+              hops.push_back({hop_bank, want_igi, static_cast<double>(n - hop_bank + 1), xfers, 1, 0, 0});
+              ph = 0;
+            } else ph = 3;
+          }
+          goto hopped;
+        }
+        if (a.hop_igi >= 0 && a.hop_mode == 6) {
+          Reg &hr = s.reg();
+          if (!ph && n && n % hop_every == 0) {
+            want_igi = hops.size() % 2 ? a.la.igi : a.hop_igi;
+            ph = 1, xfers = 0, hop_bank = n;
+          }
+          if (ph) {
+            xfers++;
+            if (ph == 1) hr.r8(0x0C50), ph = 2;
+            else if (ph == 2) hr.w8(0x0C50, static_cast<uint8_t>(want_igi)), ph = 3;
+            else if (ph == 3) ph = hr.r8(0x0C50) == want_igi ? 4 : 2;
+            else if (ph == 4) hr.w8(0x0E50, static_cast<uint8_t>(want_igi)), ph = 5;
+            else if (hr.r8(0x0E50) == want_igi) {
+              hops.push_back({hop_bank, want_igi, static_cast<double>(n - hop_bank + 1), xfers, 1, 0, 0});
+              ph = 0;
+            } else ph = 3;
+          }
+          goto hopped;
+        }
+        if (a.hop_igi >= 0 && n && n % hop_every == 0) {
+          const int igi = hops.size() % 2 ? a.la.igi : a.hop_igi;
+          const auto t = std::chrono::steady_clock::now();
+          Reg &hr = s.reg();
+          uint32_t pre = 0, r838 = 0;
+          if (a.hop_mode == 4) { // no reads at all; every write twice
+            for (uint16_t reg : {0x0C50, 0x0C50, 0x0E50, 0x0E50})
+              hr.w8(reg, static_cast<uint8_t>(igi));
+            hops.push_back({n, igi, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count(), 0, 0, 0, 0});
+            goto hopped;
+          }
+          if (a.hop_mode == 5) { // byte write, read back twice, repeat until it holds; only IGI values ever on EP0
+            uint32_t tries[2] = {0, 0};
+            int k = 0;
+            for (uint16_t reg : {0x0C50, 0x0E50}) {
+              do {
+                hr.w8(reg, static_cast<uint8_t>(igi));
+                tries[k]++;
+              } while ((hr.r8(reg) != igi || hr.r8(reg) != igi) && tries[k] < 64);
+              k++;
+            }
+            hops.push_back({n, igi, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count(),
+                            tries[0], tries[1], 0, 0});
+            goto hopped;
+          }
+          pre = hr.r32(0x0C50), r838 = hr.r32(0x0838);
+          if (a.hop_mode == 1 || a.hop_mode == 3)
+            hr.w32(0x0838, r838 & ~2u);
+          if (a.hop_mode >= 2) {
+            hr.w8(0x0C50, static_cast<uint8_t>(igi));
+            hr.w8(0x0E50, static_cast<uint8_t>(igi));
+          } else {
+            hr.m32(0x0C50, 0x7F, static_cast<uint32_t>(igi));
+            hr.m32(0x0E50, 0x7F, static_cast<uint32_t>(igi));
+          }
+          if (a.hop_mode == 1 || a.hop_mode == 3)
+            hr.w32(0x0838, r838 | 2u);
+          const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count();
+          hops.push_back({n, igi, us, hr.r32(0x0C50), hr.r32(0x0E50), pre, r838});
+        }
+      hopped:
         if (n - got.load(std::memory_order_acquire) >= kRing) { // the writer fell behind by 0.4 s
           overflow = true;
           return false;
@@ -915,6 +1014,10 @@ int cmd_stream(Session &s, const Args &a) {
       &g_stop);
   done = true;
   writer.join(); // (before e2, wrote and the files are used)
+  for (const Hop &h : hops)
+    std::printf("{\"ev\":\"stream.hop\",\"bank\":%llu,\"sample\":%llu,\"igi\":%d,\"write_us\":%.0f,\"pre\":\"%08x\",\"c50\":\"%08x\",\"e50\":\"%08x\",\"r838\":\"%08x\"}\n",
+                static_cast<unsigned long long>(h.bank), static_cast<unsigned long long>(h.bank * Stream8822b::kBankSamples),
+                h.igi, h.us, h.pre, h.c50, h.e50, h.r838);
   if (overflow)
     std::fprintf(stderr, "stream: the writer fell behind (%llu banks queued): the disk cannot keep up\n",
                  static_cast<unsigned long long>(kRing));
