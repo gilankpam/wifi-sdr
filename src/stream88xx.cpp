@@ -22,6 +22,10 @@ constexpr uint32_t kStateOff = 0x1000;  // DMEM offset of the program's state bl
 constexpr uint32_t kRecOff = 0x1100;    // bank records (0x40 apart)
 constexpr uint32_t kMagic = 0x57535431u;
 constexpr uint32_t kTrailerOcp = 0x18701000u; // RX SRAM; C2H address 0x1000
+// Live gain: byte i = i, in the trailer's page past the trailer. start() leaves the packet-buffer debug
+// window on this page, so register kIgiTabReg + v reads v while the stream runs.
+constexpr uint32_t kIgiTabOcp = kTrailerOcp + 0x800;
+constexpr uint16_t kIgiTabReg = 0x8800;
 constexpr uint32_t kBankCpu[2] = {0xB87A0000u, 0xB87B0000u};
 constexpr uint32_t kBankC2h[2] = {0x16000u, 0x06000u}; // TXFF 0x20000 / 0x30000 aliases
 constexpr uint8_t kSentinel[8] = {0xE1, 0xF1, 0x47, 0x5E, 0xA5, 0xA5, 0xA5, 0xA5}; // stream8822b.S
@@ -91,11 +95,58 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
   std::vector<uint8_t> bank(kBankBytes);
   bool seen[2] = {false, false};
   const auto t0 = clk::now();
+  // Live gain. While the streamer runs the chip executes most register writes with the data of the last
+  // control-IN transfer instead of the data sent (MEASURED: a blind write landed about 1 time in 5), so
+  // each IGI register takes three transfers: read the wanted byte from the table, write it (it lands as
+  // that byte either way), read it back. One transfer per bank: five in one bank made a bank miss its
+  // deadline (MEASURED, 1 change in 27).
+  struct {
+    uint16_t reg;
+    uint8_t keep; // bit 7 of the byte, not IGI
+  } igi_reg[2] = {{0x0C50, 0}, {0x0E50, 0}};
+  const bool live = _c.live_igi && _c.la.igi >= 0 && !_c.gapped && !_c.synthetic;
+  int live_ph = -1, live_want = 0, live_applied = 0, live_fails = 0;
+  const auto live_gain = [&] {
+    if (live_ph < 0) {
+      const int w = _c.live_igi->load(std::memory_order_relaxed) & 0x7F;
+      if (w == live_applied)
+        return;
+      live_want = w;
+      live_ph = live_fails = 0;
+    }
+    const auto &g = igi_reg[live_ph / 3];
+    const uint8_t v = static_cast<uint8_t>(live_want | g.keep);
+    switch (live_ph % 3) {
+    case 0:
+      r.r8(static_cast<uint16_t>(kIgiTabReg + v));
+      live_ph++;
+      break;
+    case 1:
+      r.w8(g.reg, v);
+      live_ph++;
+      break;
+    default:
+      if (r.r8(g.reg) == v) {
+        if (++live_ph == 6) {
+          live_applied = live_want;
+          live_ph = -1;
+        }
+      } else if (++live_fails > 16) {
+        throw std::runtime_error("live gain: the IGI write does not hold"); // a restart sets it (la.igi)
+      } else {
+        live_ph -= 2;
+      }
+    }
+  };
   // The whole start sequence; repeatable (load() halts and platform-resets the CPU first).
   const auto start = [&] {
     cpu.load(stream8822b_bin, stream8822b_bin_len);
     rx->apply(true); // MAC RX on, no frames accepted: the LA writer needs it
     la.configure(_c.la);
+    for (auto &g : igi_reg)
+      g.keep = r.r8(g.reg) & 0x80;
+    live_ph = -1;
+    live_applied = _c.la.igi;
     if (_c.synthetic) {
       std::vector<uint8_t> pat(kBankBytes);
       for (int b = 0; b < 2; b++) {
@@ -122,11 +173,11 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
       }
     }
     cpu.dmem_write(kRecOff, rec, sizeof rec);
-    { // SPIKE: byte i = i at RX SRAM 0x1800, and the debug window left on that page: register 0x8800 + v reads v
+    { // the last SRAM access before the CPU starts: it leaves the debug window on the table's page
       uint8_t tab[256];
       for (int i = 0; i < 256; i++)
         tab[i] = static_cast<uint8_t>(i);
-      r.sram_write(kTrailerOcp + 0x800, tab, sizeof tab);
+      r.sram_write(kIgiTabOcp, tab, sizeof tab);
     }
 
     rd.start();
@@ -254,6 +305,8 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
       st.late_max_us = std::max(st.late_max_us, bi.late_us);
       st.ship_max_us = std::max(st.ship_max_us, bi.ship_us);
       st.end_max_us = std::max(st.end_max_us, bi.end_us);
+      if (live)
+        live_gain();
       if (!on_bank(bank.data(), bi))
         break;
     }

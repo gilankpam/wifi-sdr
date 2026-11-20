@@ -413,6 +413,35 @@ opposite-bank window, not USB average throughput. On-chip packing tops out at 3.
   connector is path A is unknown (soldered antennas). `evidence/dual-path-tap-dma4.txt`,
   `tools/bu_twopath.py`, `tools/bu_ab_delay.py`.
 
+### Gain changes while streaming (8822B, 2026-11-20)
+One unit (T4U v3, 2357:0115), USB 3, CCA off, ch 130 / 40 MHz. Levels are the noise floor (VTX off).
+- **Register writes misbehave while the streamer runs.** A write completes without error, but about
+  4 times in 5 the chip executes it with the data of the last control-IN transfer instead of the data
+  sent: `m32(0xC50)` (read, then write) put the old IGI back in every one of 14 changes; a `w8` after a
+  read of 0x838 (0x87746343) left 0x43 in 0xC50; two blind `w8`s landed in 2 of 5 changes. Reads were
+  right every time. Before `cpu.start()` writes are reliable.
+- **What works:** read a byte that already holds the wanted value, write, read back. `Stream8822b`
+  keeps a table (byte i = i) at RX SRAM 0x18701800 with the debug window on that page, so register
+  `0x8800 + v` reads `v`. Per IGI register (0xC50, 0xE50): table read, `w8`, `r8`. 1006 of 1006 changes
+  at 50 a second took the minimum number of transfers, no fault, no stale bank.
+- **One transfer per bank.** Host register traffic slows the CPU's shipping: `end_max_us` 182.8 with
+  none, 184.0 with one transfer per bank (20 s, 250 transfers a second), against the 184.8 budget at
+  40 MS/s. A write + read-back loop run inside one bank (about 5 transfers per bank) ended a bank
+  186.2 us after due, once in 27 changes. Without the table, write + read back until it holds, one
+  transfer per bank: no fault in 1002 changes, but a median 19 and up to 171 transfers per change.
+- **Timing:** the level steps within one bank, about 3 banks after the change starts.
+- **`Receiver::set`** with only `gain_db` changed no longer restarts an 8812BU's continuous fixed-gain
+  stream (`StreamCfg::live_igi`). `wsdr_rxtest --gain 40 --gain-hop 30:100`: 191 changes in 20 s at
+  40 MS/s, 0 restarts, quietest bank 16.1 / 6.2 LSB rms in every stretch; the same at 20 and 2.5 MS/s
+  (58 and 34 changes). If the read-back fails 16 times the run ends with a fault and the restart sets
+  the gain the old way (checked by pointing the table read at the wrong page: 4 restarts in 12 changes,
+  stream up again each time).
+- With an HDZero VTX at 3 m (5658 MHz): 8 s with a 6 dB step every second (IGI 0x43 <-> 0x3D); the
+  kepyur-hd decoder found 479 frames, never lost lock, constellation error -20.4 to -20.7 dB in 100 ms
+  windows across a step, as without one.
+- Open: the 8822C (its stream still restarts), gapped mode (restarts), steps over 6 dB under a signal.
+- `wsdr_probe stream --igi-hop N --hop-ms MS --hop-mode 0..7` is the experiment (7 = the method above).
+
 ### Unknowns (Phase 2 exit list)
 1. Does dbg port 0x8fc = 0 give a live bus on *our* unit? devourer reports dbg_port 0 as dead and uses
    0x880 (`docs/la-capture.md`). Conflicting; test both. **Resolved (8822B):** both are live.

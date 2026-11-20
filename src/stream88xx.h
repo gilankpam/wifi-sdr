@@ -33,6 +33,9 @@ struct StreamCfg {
   int guard_us = 20;       // ship a bank this long after the ADC is due to finish it (< 0: test only)
   bool gapped = false;     // capture one bank, stop, ship, re-arm (banks not contiguous)
   unsigned pkt_timeout_ms = 200;
+  // 8822B, continuous, la.igi >= 0: the stream follows this IGI while it runs, no restart (FINDINGS
+  // "Gain changes while streaming"). Stream8822c ignores it.
+  const std::atomic<int> *live_igi = nullptr;
 };
 
 struct BankInfo {

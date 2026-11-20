@@ -150,6 +150,7 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   _sweep_step = 0;
   _sweep_pass = 0;
   _set.rate_sel = std::max(_set.rate_sel, lowest_rate_sel(_set));
+  _live_igi = igi_for(_set.gain_db, cu);
   _st.state = RxState::Closed;
   _st.channel = _hw_channel;
   _st.width = _hw_width;
@@ -202,10 +203,13 @@ void Receiver::set(const RxSettings &s) {
     n.gain_db = std::clamp(n.gain_db, 0.0, _caps.gain_max);
     const auto hw = [&](const RxSettings &x) {
       const int w = width_of(x, _caps.cu);
-      return std::make_tuple(channel_for(x.freq, w), w, x.rate_sel, x.agc, x.agc ? 0 : igi_for(x.gain_db, _caps.cu));
+      // (a gain the running stream follows by itself is no hardware change)
+      return std::make_tuple(channel_for(x.freq, w), w, x.rate_sel, x.agc,
+                             x.agc || live_gain(x) ? 0 : igi_for(x.gain_db, _caps.cu));
     };
     const bool same_hw = hw(n) == hw(_set);
     _set = n;
+    _live_igi = igi_for(n.gain_db, _caps.cu);
     if (same_hw)
       return; // nothing for the chip to do: keep streaming
     _last_change = clk::now();
@@ -347,6 +351,7 @@ void Receiver::worker() {
     if (!_caps.cu)
       c.la.dma_type = kDmaBothPaths8822b;
     c.gapped = cur.rate_sel < _caps.min_rate_sel;
+    c.live_igi = live_gain(cur) ? &_live_igi : nullptr;
     BankMeta meta;
     meta.gen = gen;
     meta.cfg = cfg;

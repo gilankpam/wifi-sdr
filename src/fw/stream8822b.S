@@ -16,7 +16,8 @@
 # Timing is open-loop on REG 0x568 (us) in fifths of a microsecond, so bank periods are exact
 # integers at every rate: period5 = 512 << rate. measured: the ring starts at TXFF 0x20000 within
 # ~1 us of the arm write and the ADC clock does not drift against REG 0x568 (latime, 5 s).
-# The host halts the CPU to stop; there is no host register traffic while streaming.
+# The host halts the CPU to stop; the only host register traffic while streaming is a gain change
+# (stream88xx.cpp, live gain: one EP0 transfer per bank).
 #
 # Gapped mode (+0x24 = 1; for rates the link cannot carry continuously, e.g. on USB 2): every round
 # arms the LA (the writer restarts at bank 0), waits one bank time + guard, stops the LA, and ships
