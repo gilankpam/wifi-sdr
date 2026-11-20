@@ -122,6 +122,12 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
       }
     }
     cpu.dmem_write(kRecOff, rec, sizeof rec);
+    { // SPIKE: byte i = i at RX SRAM 0x1800, and the debug window left on that page: register 0x8800 + v reads v
+      uint8_t tab[256];
+      for (int i = 0; i < 256; i++)
+        tab[i] = static_cast<uint8_t>(i);
+      r.sram_write(kTrailerOcp + 0x800, tab, sizeof tab);
+    }
 
     rd.start();
     rd.drain(30);
