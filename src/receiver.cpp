@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <tuple>
 
@@ -114,6 +115,16 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   }
   if (cu)
     s->reg().set_cap(4); // the 8822C hangs on >= 4 KiB EP0 block transfers (notes/cu-custom-code.md)
+  _oo = o;
+  if (o.sys_fd < 0) { // reopen() finds this very device again, whatever bus/port (or none) was asked for
+    libusb_device *dev = libusb_get_device(s->handle());
+    uint8_t ports[8];
+    const int np = libusb_get_port_numbers(dev, ports, sizeof ports);
+    _oo.bus = libusb_get_bus_number(dev);
+    _oo.port.clear();
+    for (int k = 0; k < np; k++)
+      _oo.port += (k ? "." : "") + std::to_string(ports[k]);
+  }
   _caps = {};
   _caps.pid = pid;
   _caps.cu = cu;
@@ -135,6 +146,9 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
   _s = std::move(s);
   _open = true;
   std::lock_guard<std::mutex> l(_m);
+  _sweep.clear();
+  _sweep_step = 0;
+  _sweep_pass = 0;
   _set.rate_sel = std::max(_set.rate_sel, lowest_rate_sel(_set));
   _st.state = RxState::Closed;
   _st.channel = _hw_channel;
@@ -212,6 +226,44 @@ RxStatus Receiver::status() const {
   return s;
 }
 
+void Receiver::sweep(const std::vector<double> &centres, double dwell_s, double gap_s) {
+  {
+    std::lock_guard<std::mutex> l(_m);
+    if (centres.empty() && _sweep.empty())
+      return; // not sweeping: nothing to stop
+    _sweep = centres;
+    _dwell_s = dwell_s;
+    _gap_s = gap_s;
+    _sweep_step = 0;
+    _sweep_pass = 0;
+    _sweep_id++;
+    _last_change = clk::now();
+    _cfg++;
+  }
+  _restart = true;
+}
+
+bool Receiver::sweeping() const {
+  std::lock_guard<std::mutex> l(_m);
+  return !_sweep.empty();
+}
+
+void Receiver::reopen() {
+  OpenOpts o = _oo;
+  o.bw = _hw_width;
+  const Primary p = primary_for(_hw_channel, _hw_width);
+  o.channel = p.channel;
+  o.offset = p.offset;
+  _s.reset(); // the interface can be claimed once: release it before the new bring-up claims it
+  auto s = std::make_unique<Session>(_log);
+  s->open(o);
+  if (_caps.cu)
+    s->reg().set_cap(4);
+  if (s->superspeed() != _caps.superspeed) // its rates would no longer be the ones the caller was given
+    throw std::runtime_error(std::string("the adapter came back at USB ") + (s->superspeed() ? "3" : "2"));
+  _s = std::move(s);
+}
+
 void Receiver::worker() {
   struct Done { // the worker ends (stop, Lost, Error): say so in the status
     Receiver *r;
@@ -239,13 +291,26 @@ void Receiver::worker() {
     _restart = false;
     RxSettings cur;
     uint32_t gen, cfg;
+    int step = -1; // sweep step of this run
+    uint32_t pass = 0, sweep_id = 0;
+    double dwell_s = 0, gap_s = 0;
     {
       std::lock_guard<std::mutex> l(_m);
       cur = _set;
+      if (!_sweep.empty()) {
+        step = static_cast<int>(_sweep_step % _sweep.size());
+        cur.freq = _sweep[step];
+        pass = _sweep_pass;
+        sweep_id = _sweep_id;
+        dwell_s = _dwell_s;
+        gap_s = _gap_s;
+      }
       gen = ++_gen;
       note_gen(gen);
       cfg = _cfg;
       _st.state = RxState::Starting;
+      _st.step = step;
+      _st.pass = pass;
     }
     const int width = width_of(cur, _caps.cu);
     const int ch = channel_for(cur.freq, width);
@@ -291,6 +356,8 @@ void Receiver::worker() {
     meta.paths = _caps.paths;
     meta.cu = _caps.cu;
     meta.gapped = c.gapped;
+    meta.step = step;
+    meta.pass = pass;
     {
       std::lock_guard<std::mutex> l(_m);
       _st.channel = ch;
@@ -303,6 +370,12 @@ void Receiver::worker() {
       _st.state = RxState::Streaming;
     }
     bool clean_start = false;
+    // A sweep step ends once dwell_s of samples has been delivered (gapped: of wall time, as its banks
+    // are separate captures).
+    const double dwell_banks = std::ceil(dwell_s * fs / (Stream8822b::kBankBytes / 8.0));
+    uint64_t run_banks = 0;
+    clk::time_point run_t0{};
+    bool step_done = false;
     const auto on_bank = [&](const uint8_t *bank, const BankInfo &) {
       if (!clean_start) {
         clean_start = true;
@@ -316,9 +389,17 @@ void Receiver::worker() {
         _st.banks++;
         // A frequency change inside the same step needs no restart (set() leaves _cfg alone), so the
         // shift follows _set; after a hardware change (_cfg moved on) this run keeps its own frequency.
-        meta.shift_hz = (_cfg == cfg ? _set.freq : cur.freq) - centre;
+        meta.shift_hz = (step < 0 && _cfg == cfg ? _set.freq : cur.freq) - centre;
       }
       _sink(bank, Stream8822b::kBankBytes, meta);
+      if (step >= 0) {
+        if (run_banks++ == 0)
+          run_t0 = clk::now();
+        step_done = c.gapped ? clk::now() - run_t0 >= std::chrono::duration<double>(dwell_s)
+                             : static_cast<double>(run_banks) >= dwell_banks;
+        if (step_done)
+          return false; // next step
+      }
       return _active.load();
     };
     StreamStats ss;
@@ -330,9 +411,15 @@ void Receiver::worker() {
     {
       std::lock_guard<std::mutex> l(_m);
       _st.start_retries += ss.start_retries;
+      if (step_done && _sweep_id == sweep_id && !_sweep.empty() && ++_sweep_step >= _sweep.size()) {
+        _sweep_step = 0;
+        _sweep_pass++;
+      }
     }
-    if (ss.error.empty() || _restart || !_active)
-      continue; // settings change or stop
+    if (step_done && gap_s > 0 && !_restart && _active)
+      std::this_thread::sleep_for(std::chrono::duration<double>(gap_s));
+    if (step_done || ss.error.empty() || _restart || !_active)
+      continue; // next sweep step, settings change or stop
     // The count and the reason change together: a status() read between them would show a new
     // restart with the old (or no) text, and the reason is the only record of why.
     RxState next = RxState::Starting;
@@ -353,6 +440,29 @@ void Receiver::worker() {
     }
     if (next != RxState::Starting)
       break;
+    // MEASURED (now-studio's 5 GHz sweep, 8812BU at 40 MS/s, 2026-11-22): now and then the RX DMA
+    // locks mid-stream. The CPU program still arms and the LA runs, but no packet reaches bulk-IN, and
+    // no restart (CPU reload + LA configure) brings it back; a full bring-up does. So the 2nd and 4th
+    // consecutive fault re-open the adapter in place (not with a granted fd: it cannot be re-opened).
+    if ((consecutive_faults == 2 || consecutive_faults == 4) && _oo.sys_fd < 0) {
+      std::fprintf(stderr, "receiver: %d stream faults in a row, re-opening the adapter (%s)\n",
+                   consecutive_faults, ss.error.c_str());
+      set_state(RxState::Opening);
+      try {
+        reopen();
+        _hw_channel = 0; // (reopen() tuned it; tune again anyway, with the run's own settings)
+        std::lock_guard<std::mutex> l(_m);
+        _st.reopens++;
+      } catch (const OpenError &e) {
+        set_state(e.kind == OpenError::NotFound ? RxState::Lost : RxState::Error,
+                  std::string("re-open after stream faults failed: ") + e.what());
+        break;
+      } catch (const std::exception &e) {
+        set_state(RxState::Error, std::string("re-open after stream faults failed: ") + e.what());
+        break;
+      }
+      continue;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 }

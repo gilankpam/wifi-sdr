@@ -10,6 +10,11 @@
 // the residual shift belong on the consumer's thread; BankMeta carries what they need.
 //
 // Faults restart the stream; an unplugged or dead adapter moves the state to Lost and the worker ends.
+// Restarts that keep failing (the 8812BU's RX DMA can lock until a MAC re-init) re-open the adapter in
+// place, a full bring-up, before the state goes to Error.
+//
+// A sweep (sweep()) steps the hardware through a list of centres: one stream run of dwell_s per step,
+// each run tagged with its step in BankMeta.
 // Logic follows src/soapy/SoapyWsdr.cpp (measured behaviour: FINDINGS §4).
 #pragma once
 
@@ -23,6 +28,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "logger.h"
 #include "session.h"
@@ -68,6 +74,8 @@ struct BankMeta {
   bool cu = false;
   bool gapped = false;   // each bank is a complete capture, but banks are not contiguous (a ~1.5 ms gap
                          // between them): FFT within a bank only, no continuous recording
+  int step = -1;         // sweep step of this run (index into the centres; -1: not sweeping)
+  uint32_t pass = 0;     // sweep pass (counts up each time the sweep wraps to step 0)
 };
 
 using BankSink = std::function<void(const uint8_t *bank, size_t bytes, const BankMeta &)>;
@@ -85,6 +93,9 @@ struct RxStatus {
   bool settling = false; // a settings change is waiting to be applied (the run above is about to end)
   bool gapped = false;   // the current run is gapped (BankMeta::gapped)
   unsigned start_retries = 0; // stream starts repeated because the first packet never came (issue #2)
+  uint64_t reopens = 0;  // in-place re-opens after restarts kept failing
+  int step = -1;         // sweep step of the current run (-1: not sweeping)
+  uint32_t pass = 0;     // its sweep pass
 };
 
 class Receiver {
@@ -110,6 +121,14 @@ public:
   void set(const RxSettings &s);
   RxSettings settings() const;
   RxStatus status() const;
+  // Sweep: step through the hardware centres (Hz), one stream run of dwell_s per step, wrapping
+  // around; the other settings (rate, width, gain) stay those of set(). Every run is a new gen and its
+  // banks carry step/pass. An empty list stops the sweep (the stream returns to settings().freq). A new
+  // list starts again at step 0, pass 0. A set() that changes the hardware restarts the current step.
+  // gap_s: a pause with the chip idle between steps. Back-to-back runs stall the 8812BU's RX DMA more
+  // often (LOG 2026-11-22: 5 stalls in 5 min without a gap, 2 with 30 ms).
+  void sweep(const std::vector<double> &centres, double dwell_s, double gap_s = 0);
+  bool sweeping() const;
 
   // Pure helpers (also used by tests and UIs).
   static double rate_of(int rate_sel) { return 80e6 / (1 << rate_sel); }
@@ -134,6 +153,9 @@ public:
 private:
   void worker();
   void set_state(RxState s, const std::string &err = {});
+  void reopen(); // worker thread only: a full re-open of the same adapter at the current channel
+
+  OpenOpts _oo; // as opened (bus/port of the device that came up), for reopen()
 
   Logger_t _log;
   std::unique_ptr<Session> _s;
@@ -144,6 +166,10 @@ private:
   std::chrono::steady_clock::time_point _last_change{};
   RxStatus _st;
   int _hw_channel = 0, _hw_width = 20;
+  std::vector<double> _sweep; // under _m: the sweep's centres (empty: none)
+  double _dwell_s = 0, _gap_s = 0;
+  size_t _sweep_step = 0;
+  uint32_t _sweep_pass = 0, _sweep_id = 0; // _sweep_id: bumped by every sweep() call
   BankSink _sink;
   std::atomic<bool> _active{false}, _restart{false}, _open{false};
   std::thread _worker;
