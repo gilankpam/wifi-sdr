@@ -316,3 +316,19 @@ Evidence: `evidence/phase0/doctor-8812bu-ch{6,1}.{jsonl,stderr}`, `evidence/phas
   `wsdr_rxtest`: 8812BU 40 MS/s 10 s with a ch36→44 retune, 48253 banks, 0 restarts, sink 1.1 µs/bank.
 - 8812CU unplugged at ~13:57 (clean USB disconnect, not during a test); its regression is pending.
 
+
+## 2026-11-22 — 8812BU RX-DMA stall under fast retunes: in-place re-open, Receiver sweep
+- Field report (now-studio's 5 GHz scanner: 14 centres, 40 MS/s wide, a `set` every ~350 ms): ~12
+  stalls/h. Mid-run (banks 629/846/1256), "no packet within timeout"; after that every start arms
+  (DMEM state 1, t_arm advancing, r7c0 0x800000cb) but no packet reaches bulk-IN. CPU reload + LA
+  configure never recovers (15 starts); a full re-open does. Same signature as the 65:00.3 C2H wedge
+  (LOG 2026-10-25 11:40), here on the good controller 67:00.3 at a far lower rate.
+- `Receiver` now re-opens the adapter in place (full bring-up, same bus/port) at the 2nd and 4th
+  consecutive fault, Error only at the 5th. Measured: 7 re-opens in 10 min, all recovered, ~2.3 s each.
+- `Receiver::sweep(centres, dwell_s, gap_s)`: one run per centre, BankMeta step/pass. 5 min each,
+  same 14 centres, 160 ms dwell: gap 0 → 223 ms/step, 5 stalls in 1369 runs (0.37 %); gap 30 ms →
+  245 ms/step (p90 246), 2 stalls in 1208 runs (0.17 %, the set loop's ~0.11 %). Short runs, so
+  suggestive only.
+- The "no first packet in 20 ms, starting again" retries show the stall's exact state (state 1,
+  r7c0 800000cb) and cluster right before stalls (3 of 6, then 2 of 2 episodes; ~1 retry in 250 runs).
+  They look like an early symptom of the RX path failing, not a cause. Open: what degrades it.
