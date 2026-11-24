@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
     if (k == "--pid") pid = static_cast<uint16_t>(std::strtoul(v, nullptr, 0)), i++;
     else if (k == "--freq") set.freq = std::strtod(v, nullptr), i++;
     else if (k == "--rate") set.rate_sel = std::atoi(v), i++;
+    else if (k == "--depth") set.depth = std::atoi(v), i++;
     else if (k == "--seconds") seconds = std::strtod(v, nullptr), i++;
     else if (k == "--retune") retune = std::strtod(v, nullptr), i++;
     else if (k == "--sweep") {
@@ -57,7 +58,7 @@ int main(int argc, char **argv) {
   }
   if (!pid) {
     std::fprintf(stderr, "usage: wsdr_rxtest --pid 0xb812|0xc812|0xa81a [--freq HZ] [--rate 0..5] [--seconds N] [--gapped]\n"
-                         "                   [--retune HZ | --sweep FIRST:LAST:STEP [--dwell-ms MS]]\n");
+                         "                   [--depth URBS] [--retune HZ | --sweep FIRST:LAST:STEP [--dwell-ms MS]]\n");
     return 2;
   }
   Receiver rx(std::make_shared<Logger>());

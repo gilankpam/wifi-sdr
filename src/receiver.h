@@ -46,6 +46,9 @@ struct RxSettings {
   bool agc = false;     // true: chip AGC; false: fixed gain (OFDM CCA off, IGI pinned)
   double gain_db = 30;
   bool allow_gapped = false; // rate_sel below min_rate_sel streams gapped (see BankMeta::gapped)
+  int depth = 0;        // bulk-IN transfers kept queued (~16 kB each); 0: 256 at >= 20 MS/s and on the 8812CU,
+                        // else 64. More rides out longer stalls of the stream thread on a busy host (a Quest 3S
+                        // with every core loaded: 768, 31 ms at 40 MS/s, 12 MB)
 };
 
 struct RxCaps {

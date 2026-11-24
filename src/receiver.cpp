@@ -202,7 +202,8 @@ void Receiver::set(const RxSettings &s) {
     n.gain_db = std::clamp(n.gain_db, 0.0, _caps.gain_max);
     const auto hw = [&](const RxSettings &x) {
       const int w = width_of(x, _caps.cu);
-      return std::make_tuple(channel_for(x.freq, w), w, x.rate_sel, x.agc, x.agc ? 0 : igi_for(x.gain_db, _caps.cu));
+      return std::make_tuple(channel_for(x.freq, w), w, x.rate_sel, x.agc, x.agc ? 0 : igi_for(x.gain_db, _caps.cu),
+                             x.depth);
     };
     const bool same_hw = hw(n) == hw(_set);
     _set = n;
@@ -340,7 +341,7 @@ void Receiver::worker() {
     StreamCfg c;
     c.la.rate_sel = cur.rate_sel;
     // >= 20 MS/s needs ~13 ms of posted URBs; the 8812CU wants ~100 ms (FINDINGS §4)
-    c.depth = _caps.cu || cur.rate_sel <= 2 ? 256 : 64;
+    c.depth = cur.depth > 0 ? std::min(cur.depth, 4096) : _caps.cu || cur.rate_sel <= 2 ? 256 : 64;
     c.la.igi = cur.agc ? -1 : igi_for(cur.gain_db, _caps.cu);
     c.la.no_cca = !cur.agc;
     c.la.dfir = !_caps.cu && width >= 40 ? width : 0; // 0 leaves devourer's DFIR (8822B: BW20 set; 8822C: per width)
